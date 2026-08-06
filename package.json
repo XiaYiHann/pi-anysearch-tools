@@ -1,6 +1,6 @@
 {
   "name": "pi-anysearch-tools",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "AnySearch web search toolset for the Pi coding agent: anysearch_search tool, anonymous fallback, interactive API key setup on install (postinstall + /anysearch-setup). Uses https://api.anysearch.com/v1/search.",
   "type": "module",
   "keywords": [

@@ -25,10 +25,17 @@ export default function anysearchExtension(pi: ExtensionAPI) {
 		name: "anysearch_search",
 		label: "AnySearch Search",
 		description:
-			"Search the web using the AnySearch API (https://api.anysearch.com/v1/search). " +
-			"Returns ranked results with title, URL, snippet, and optionally cleaned-up page content. " +
-			"Use when the user asks for fresh, current, or web-based information.",
-		promptSnippet: "Search the web using AnySearch (unified search for AI agents)",
+			"Primary web search tool backed by AnySearch (https://api.anysearch.com/v1/search). " +
+			"Use this for ANY query that needs fresh, current, or external information: news, stock prices, product info, docs, people, latest versions, comparisons, fact-checking, or anything your training data may not cover.\n\n" +
+			"Trigger when the query contains or implies: search, find, look up, latest, current, recent, today, now, news, price, weather, release, update, or when you are unsure whether the answer requires external info. Also use for 'what is', 'who is', 'how do I', 'X vs Y' when the answer may have changed or be niche.\n\n" +
+			"Returns ranked results with title, URL, snippet, and optionally cleaned-up page content (include_content=true). " +
+			"Supports region (zone: cn/intl), language (e.g. zh-CN), and vertical search tags (tag: code.doc, news, finance, ...). " +
+			"Works anonymously without an API key; no provider routing needed — this tool IS the search.",
+		promptSnippet: "Search the web via AnySearch (unified search for AI agents) — use for any fresh/external information",
+		promptGuidelines: [
+			"Use anysearch_search for all web searches instead of relying on stale knowledge; it is the primary search tool.",
+			"Pass zone/language for region-specific queries and include_content when full page text is needed.",
+		],
 		parameters: Type.Object({
 			query: Type.String({ description: "Search query" }),
 			max_results: Type.Optional(

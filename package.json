@@ -1,0 +1,44 @@
+{
+  "name": "pi-anysearch-tools",
+  "version": "0.1.0",
+  "description": "AnySearch web search toolset for the Pi coding agent: anysearch_search tool, anonymous fallback, interactive API key setup on install (postinstall + /anysearch-setup). Uses https://api.anysearch.com/v1/search.",
+  "type": "module",
+  "keywords": [
+    "pi-package",
+    "pi",
+    "pi-coding-agent",
+    "extension",
+    "web-search",
+    "anysearch"
+  ],
+  "license": "MIT",
+  "author": {
+    "name": "xyh"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/xyh/pi-anysearch-tools.git"
+  },
+  "files": [
+    "*.ts",
+    "scripts/",
+    "README.md",
+    ".env.example",
+    "banner.png"
+  ],
+  "scripts": {
+    "postinstall": "node scripts/postinstall.mjs",
+    "test": "node --experimental-strip-types --test test/*.test.ts"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "typebox": "*"
+  },
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ],
+    "image": "https://raw.githubusercontent.com/xyh/pi-anysearch-tools/main/banner.png"
+  }
+}

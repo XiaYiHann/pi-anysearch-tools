@@ -9,6 +9,7 @@
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
+import { Text } from "@earendil-works/pi-tui";
 import {
 	hasApiKey,
 	hasBeenPrompted,
@@ -78,6 +79,48 @@ export default function anysearchExtension(pi: ExtensionAPI) {
 				content: [{ type: "text", text: response.text }],
 				details: response.details,
 			};
+		},
+
+		renderCall(args, theme) {
+			// e.g. anysearch_search 「TypeScript 5.9 release notes」 (max_results=3)
+			let text = theme.fg("toolTitle", theme.bold("anysearch_search"));
+			text += theme.fg("accent", ` 「${args.query}」`);
+			const opts: string[] = [];
+			if (args.max_results) opts.push(`max_results=${args.max_results}`);
+			if (args.tag) opts.push(`tag=${args.tag}`);
+			if (args.zone) opts.push(`zone=${args.zone}`);
+			if (args.language) opts.push(`lang=${args.language}`);
+			if (args.include_content) opts.push("include_content");
+			if (opts.length > 0) text += theme.fg("dim", ` (${opts.join(", ")})`);
+			return new Text(text, 0, 0);
+		},
+
+		renderResult(result, { expanded, isPartial }, theme) {
+			if (isPartial) {
+				return new Text(theme.fg("warning", "AnySearch 搜索中…"), 0, 0);
+			}
+
+			const details = result.details as
+				| { results?: Array<{ title?: string; url?: string; snippet?: string }>; apiKeyUsed?: boolean }
+				| undefined;
+			const results = details?.results ?? [];
+
+			if (results.length === 0) {
+				return new Text(theme.fg("warning", "AnySearch: 无结果"), 0, 0);
+			}
+
+			const header = theme.fg("toolTitle", theme.bold(`AnySearch ${results.length} 条结果`));
+			const lines = results.map((r, i) => {
+				const title = r.title ? theme.fg("accent", r.title) : "(无标题)";
+				const url = r.url ? theme.fg("dim", r.url) : "";
+				let line = `${theme.fg("dim", `${i + 1}.`)} ${title}`;
+				if (url) line += `\n   ${url}`;
+				if (expanded && r.snippet) line += `\n   ${theme.fg("dim", r.snippet)}`;
+				return line;
+			});
+
+			const mode = details?.apiKeyUsed ? theme.fg("success", "key") : theme.fg("warning", "anonymous");
+			return new Text(`${header}\n${lines.join("\n")}\n${theme.fg("dim", `mode: ${mode}`)}`, 0, 0);
 		},
 	});
 

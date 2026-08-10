@@ -1,118 +1,174 @@
 # pi-anysearch-tools
 
-**AnySearch 驱动的网页搜索工具，作为 Pi Coding Agent 的扩展包。**
+[![npm](https://img.shields.io/npm/v/pi-anysearch-tools)](https://www.npmjs.com/package/pi-anysearch-tools)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](#license)
 
-注册 `anysearch_search` 工具，由 [AnySearch Search API](https://www.anysearch.com/docs#search-api)
-（`POST https://api.anysearch.com/v1/search`）提供支持：根据查询意图路由到最合适的数据源，
-融合并重排结果，返回带标题、URL、摘要（可选清洗后正文）的结果列表。
+`pi-anysearch-tools` is a [Pi Coding Agent](https://pi.dev/) extension that adds the `anysearch_search` tool. It searches fresh, external web information through the AnySearch API:
 
-## 特性
-
-- **零配置可用**：AnySearch 支持匿名访问（按 IP 限速 + 每日免费配额），不配 key 也能搜。
-- **可选 API key**：`ANYSEARCH_API_KEY` 环境变量或配置文件，走付费配额、更高并发。
-- **结果自带正文**：`include_content: true` 时直接返回清洗后的页面正文，无需二次抓取。
-- **标准 Pi package**：通过 `pi install` 安装，TypeScript 直接加载（jiti），无需编译。
-
-## 安装
-
-本地目录安装（开发）：
-
-```bash
-pi install /path/to/pi-anysearch-tools
+```text
+POST https://api.anysearch.com/v1/search
 ```
 
-或发布到 npm 后：
+Use it for current documentation, news, prices, products, people, comparisons, fact-checking, and other information that may not be available in the model's training data. It is a web-search tool—not a replacement for Pi's local file or shell tools.
+
+> 中文说明：这是一个面向 Pi Coding Agent 的 AnySearch 联网搜索扩展。无需 API key 也可匿名使用，但匿名请求受速率和配额限制。
+
+## Core capabilities
+
+- Ranked web results with titles, URLs, and snippets.
+- Optional cleaned page content with `include_content: true`.
+- Region, language, vertical-search tag, and provider-specific parameter support.
+- Anonymous access without initial configuration.
+- Optional API-key authentication from an environment variable or Pi agent configuration.
+- Compact Pi TUI rendering, with summaries available in expanded mode.
+
+## Installation
+
+Install the published npm package:
 
 ```bash
 pi install npm:pi-anysearch-tools
 ```
 
-临时试用（当前会话，不写入设置）：
+### Local development and temporary use
+
+From a checkout of this repository:
 
 ```bash
-pi -e /path/to/pi-anysearch-tools
+# Load the extension for the current Pi invocation only
+pi -e .
+
+# Install the local directory as a Pi package
+pi install .
 ```
 
-## API Key 配置
+## API key configuration
 
-优先级：`ANYSEARCH_API_KEY` 环境变量 > 配置文件 > 匿名访问。
+Configuration priority is:
+
+```text
+ANYSEARCH_API_KEY environment variable
+> ~/.pi/agent/anysearch.json
+> anonymous mode
+```
+
+Set the environment variable in your shell or CI environment:
 
 ```bash
-# 环境变量
-export ANYSEARCH_API_KEY=as_sk_...
+export ANYSEARCH_API_KEY="your-api-key"
 ```
 
-或写入配置文件 `<agent dir>/anysearch.json`（通常是 `~/.pi/agent/anysearch.json`）：
+Or create `~/.pi/agent/anysearch.json`:
 
 ```json
 {
-  "anysearchApiKey": "as_sk_..."
+  "anysearchApiKey": "your-api-key"
 }
 ```
 
-不配置任何 key 时自动使用匿名访问，功能不受影响，只是限速更严格。
+`~/.pi/agent` is Pi's default agent directory. If `PI_CODING_AGENT_DIR` is set, the extension reads `anysearch.json` from that directory instead.
 
-## 安装后提醒
+Anonymous mode remains usable when no key is configured, but it has stricter rate and quota limits.
 
-`pi install` 本身不会加载扩展，因此包内代码无法在安装命令执行时弹提示；
-但**安装后第一次启动 Pi（TUI）时**会自动弹出一次性提醒：
+### Pi commands
 
-- 已配置 key → 不提醒。
-- 未配置 → 顶部警告条提示配置 key，同时**保持匿名模式可用**。
-- 提醒只出现一次（记入 `pi-anysearch-state.json`），不会每次打扰。
-
-提醒出现后，可以直接运行 `/anysearch-setup` 交互式输入 key：
-
-```
-/anysearch-setup   # 粘贴 as_sk_... key，自动写入配置文件
-/anysearch-status  # 查看当前认证状态与配置路径
+```text
+/anysearch-setup
 ```
 
-`/anysearch-setup` 保存后立即生效（无需重启），`anysearch_search` 马上切换到付费配额。
+Opens an interactive prompt and saves the key to the Pi agent configuration file. The new key is used by subsequent searches without restarting Pi, unless a non-empty `ANYSEARCH_API_KEY` remains set; the environment variable always takes precedence.
 
-## 工具说明
+```text
+/anysearch-status
+```
+
+Shows the configuration path and reports only `已配置` (configured) or `匿名模式` (anonymous mode). It does not display the key or a key prefix.
+
+### `postinstall` behavior
+
+The npm package includes a `postinstall` script:
+
+- In an interactive terminal, it may ask for an API key when none is configured. Press Enter to keep using anonymous mode.
+- In a non-interactive installation, it skips the prompt and prints setup guidance; installation still succeeds.
+- If npm lifecycle scripts are disabled, for example with `npm install --ignore-scripts`, the script does not run.
+
+You can always configure the extension later with `/anysearch-setup` or `ANYSEARCH_API_KEY`.
+
+## Tool reference
 
 ### `anysearch_search`
 
-| 参数 | 类型 | 必填 | 说明 |
-|------|------|------|------|
-| `query` | string | ✅ | 搜索查询 |
-| `max_results` | int | – | 结果数 1–20，默认 10 |
-| `tag` | string | – | 子域能力标签，如 `code.doc`，按意图路由到专门数据源 |
-| `zone` | string | – | 区域：`cn` 或 `intl` |
-| `language` | string | – | 偏好语言，如 `zh-CN`、`en` |
-| `params` | object | – | 透传给 AnyMix 的扩展参数，如 `{"ticker": "AAPL"}` |
-| `include_content` | bool | – | 是否在结果中附带清洗后的页面正文 |
+| Parameter | Type | Required | Description |
+| --- | --- | --- | --- |
+| `query` | string | Yes | Non-empty web search query. Whitespace-only values are rejected. |
+| `max_results` | integer | No | Number of results, from 1 to 20. Default: 10. |
+| `tag` | string | No | Vertical capability tag such as `code.doc` or `news`. |
+| `zone` | `cn` \| `intl` | No | Search region. |
+| `language` | string | No | Preferred language, such as `zh-CN` or `en`. |
+| `params` | object | No | Extra AnyMix parameters, such as `{"ticker":"AAPL"}`. |
+| `include_content` | boolean | No | Include cleaned page content. This produces a substantially larger response. |
 
-返回结果示例（agent 看到的文本）：
+Example tool arguments:
 
+```json
+{
+  "query": "latest Pi Coding Agent extension documentation",
+  "max_results": 5,
+  "zone": "intl",
+  "language": "en",
+  "include_content": false
+}
 ```
-1. Pi Coding Agent
-   https://pi.dev/
-   AGENTS.md: Project instructions loaded at startup from ...
-```
 
-## 与 pi-web-access 共存
+## Returned results
 
-本地若已安装 [pi-web-access](https://github.com/nicobailon/pi-web-access)（它注册 `web_search`
-等多 provider 工具，AnySearch 是其中显式 provider 之一），本包注册的是独立的
-`anysearch_search` 工具名，不会冲突。两者可同时存在：
+The tool returns numbered text for the agent. Each result contains:
 
-- 想要纯 AnySearch 体验：只启用 `anysearch_search`（如 `--tools anysearch_search`）。
-- 想要全家桶：保留 pi-web-access，本包可作为专用入口或对照。
+1. title;
+2. URL;
+3. snippet, when available;
+4. cleaned page content only when `include_content` is `true`.
 
-## 开发与测试
+Structured result details also contain the result list, API metadata, and an `apiKeyUsed` boolean. They never contain the API key. API and network failures are thrown so Pi can mark the tool result as an error.
+
+In the TUI, the default view stays compact. Expanding the tool result shows snippets, but the renderer does not repeat full page bodies.
+
+## Coexisting with `pi-web-access`
+
+This package can be installed alongside [`pi-web-access`](https://github.com/nicobailon/pi-web-access). `pi-anysearch-tools` registers the distinct tool name `anysearch_search`, so it does not replace `pi-web-access` tools such as `web_search`.
+
+Use `anysearch_search` when you want a direct AnySearch entry point; keep `pi-web-access` when you also want its broader provider and web-access features.
+
+## Security
+
+- Never commit API keys to Git, source files, examples, or issue reports.
+- Prefer `ANYSEARCH_API_KEY` for CI and managed environments.
+- The configuration file stores the key locally as plain JSON; protect access to your Pi agent directory.
+- Pi extensions execute with the user's permissions. Review the source before installation.
+- This extension performs network requests to `https://api.anysearch.com/v1/search` when `anysearch_search` is called. It does not make a network request merely by loading the extension.
+
+## Development and verification
 
 ```bash
-npm test                     # 单元测试（不依赖网络）
+npm install --ignore-scripts
+npm test
+npm pack --dry-run
 ```
 
-本地端到端验证（需要模型配置）：
+For a temporary local Pi run:
 
 ```bash
-pi -e . --tools anysearch_search -p "搜索 pi coding agent"
+pi -e .
 ```
+
+## Links
+
+- [GitHub repository](https://github.com/XiaYiHann/pi-anysearch-tools)
+- [npm package](https://www.npmjs.com/package/pi-anysearch-tools)
+- [Pi package page](https://pi.dev/packages/pi-anysearch-tools)
+- [AnySearch Search API documentation](https://www.anysearch.com/docs#search-api)
+- [Pi Coding Agent](https://pi.dev/)
 
 ## License
 
-MIT
+MIT, as declared in [`package.json`](./package.json).

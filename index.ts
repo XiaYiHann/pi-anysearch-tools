@@ -29,16 +29,19 @@ const SETUP_COMMAND = `/${SETUP_COMMAND_NAME}`;
 const ANONYMOUS_MODE_NOTICE =
 	`AnySearch 匿名模式：请求受速率和配额限制。运行 ${SETUP_COMMAND} 配置 API key，或设置 ANYSEARCH_API_KEY。`;
 const TOOL_DESCRIPTION =
-	`Search fresh, current, or otherwise external web information through AnySearch (${API_ENDPOINT}). ` +
-	"Use it for news, prices, weather, product and documentation updates, people, comparisons, and fact-checking. " +
+	`Direct web search via AnySearch (${API_ENDPOINT}) returning high-quality ranked results with clean snippets. ` +
+	"Complements web_search: strong for single-query lookups — " +
+	"fresh facts, news, prices and stocks (tag \"news\" or params like {\"ticker\": \"AAPL\"}), weather, " +
+	"and Chinese/regional content (zone \"cn\" with language \"zh-CN\"). " +
+	"Prefer web_search for comprehensive research, multi-angle queries, multi-provider fan-out, or interactive curation. " +
 	"Do not use it to search local files or perform shell operations. " +
 	"Returns ranked titles, URLs, and snippets; include_content=true also includes cleaned page content and produces a much larger response. " +
 	"Anonymous access works without an API key but is subject to rate and quota limits.";
 const PROMPT_SNIPPET =
-	"Search the web via AnySearch for fresh, current, or external information";
+	"Search the web via AnySearch — direct single-query lookups with ranked results (news, prices, stocks, weather, Chinese/regional, vertical tags); complements web_search";
 const PROMPT_GUIDELINES = [
-	`Use ${TOOL_NAME} for fresh, current, or external web information instead of relying on stale knowledge.`,
-	`Do not use ${TOOL_NAME} for local file searches or shell operations; use the appropriate local tools instead.`,
+	`Use ${TOOL_NAME} for direct single-query web lookups — fresh facts, news, prices, weather, and Chinese/regional queries (zone "cn", language "zh-CN") — it complements web_search rather than replacing it.`,
+	`Prefer web_search for comprehensive or multi-angle research, multi-provider fan-out, interactive curation, or workflows combined with fetch_content, source_check, or get_search_content.`,
 	`When using ${TOOL_NAME}, set zone/language for regional queries and use include_content=true only when full page text is needed because it produces a much larger response.`,
 ];
 const COLLAPSED_RESULT_LIMIT = 5;

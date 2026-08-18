@@ -220,11 +220,12 @@ export function parseResponse(value: unknown): { results: AnySearchResult[]; met
 			throw invalidResponse(`expected data.results[${index}] object`);
 		}
 		const result = item as Record<string, unknown>;
-		const { title, url, snippet, content } = result;
+		const { title, url } = result;
 		if (typeof title !== "string") throw invalidResponse(`expected data.results[${index}].title string`);
 		if (typeof url !== "string" || !url) throw invalidResponse(`expected data.results[${index}].url non-empty string`);
-		if (typeof snippet !== "string") throw invalidResponse(`expected data.results[${index}].snippet string`);
-		if (typeof content !== "string") throw invalidResponse(`expected data.results[${index}].content string`);
+		// snippet/content are best-effort on the server side and may be missing/null when a page fetch fails.
+		const snippet = typeof result.snippet === "string" ? result.snippet : "";
+		const content = typeof result.content === "string" ? result.content : "";
 		results.push({ title, url, snippet, content });
 	}
 

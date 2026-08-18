@@ -46,6 +46,21 @@ test("parseResponse rejects malformed result entries", () => {
 	);
 });
 
+test("parseResponse normalizes missing/null snippet and content", () => {
+	const { results } = parseResponse({
+		code: 0,
+		data: {
+			results: [
+				{ title: "T", url: "https://x.dev", snippet: null },
+				{ title: "T2", url: "https://y.dev", snippet: "S", content: null },
+				{ title: "T3", url: "https://z.dev" },
+			],
+		},
+	});
+	assert.deepEqual(results.map((r) => r.snippet), ["", "S", ""]);
+	assert.deepEqual(results.map((r) => r.content), ["", "", ""]);
+});
+
 test("parseResponse tolerates missing metadata", () => {
 	const { metadata } = parseResponse({
 		code: 0,

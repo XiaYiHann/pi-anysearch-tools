@@ -582,6 +582,44 @@ test("dedupeSearchResults collapses truncation-prefix titles (same doc, truncate
 	assert.ok(out.includes("(1 results, 100ms)"), "count rewritten");
 });
 
+test("dedupeSearchResults collapses aggregator site suffixes (same doc on several sites)", () => {
+	const md = [
+		"## Search Results (3 results, 100ms)",
+		"",
+		"### 1. Who Gets the Reward & Who Gets the Blame? Evaluation-Aligned Training Signals for Multi-LLM Agents - arXiv.gg",
+		"- **URL**: https://arxiv.gg/abs/2511.10687",
+		"- one",
+		"",
+		"### 2. Who Gets the Reward & Who Gets the Blame? Evaluation-Aligned Training Signals for Multi-LLM Agents | OpenReview",
+		"- **URL**: https://openreview.net/forum?id=habbb09al0",
+		"- two",
+		"",
+		"### 3. A Distinct Unrelated Result with a Different Topic",
+		"- **URL**: https://example.com/other",
+		"- three",
+	].join("\n");
+	const out = dedupeSearchResults(md);
+	assert.ok(out.includes("### 1. Who Gets the Reward"), "first kept");
+	assert.ok(!out.includes("- two"), "site-suffix duplicate dropped");
+	assert.ok(out.includes("### 2. A Distinct Unrelated Result"), "distinct item renumbered");
+	assert.ok(out.includes("(2 results, 100ms)"), "count rewritten");
+});
+
+test("normalizeSearchTitle strips site suffixes, punctuation, and normalizes &/, variants", () => {
+	assert.equal(normalizeSearchTitle("Foo Bar | alphaXiv"), "foo bar");
+	assert.equal(normalizeSearchTitle("Foo Bar – OpenReview"), "foo bar");
+	assert.equal(normalizeSearchTitle("Foo Bar - arXiv.gg"), "foo bar");
+	assert.equal(
+		normalizeSearchTitle("Who Gets the Reward, Who Gets the Blame? Paper"),
+		normalizeSearchTitle("Who Gets the Reward & Who Gets the Blame? Paper | alphaXiv"),
+		"punctuation + suffix variants normalize to one key",
+	);
+	assert.equal(
+		normalizeSearchTitle("Shapley-Coop: Emergent Cooperation in Self-Organization"),
+		"shapley coop emergent cooperation in self organization",
+	);
+});
+
 test("dedupeSearchResults leaves non-search text unchanged", () => {
 	const extract = "## Example Domain\n\n**Source**: https://example.com\n\nThis domain is reserved.";
 	assert.equal(dedupeSearchResults(extract), extract);

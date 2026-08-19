@@ -396,9 +396,22 @@ export function normalizeSearchUrl(raw: string): string {
 	}
 }
 
-/** Normalize a search-result title for dedupe: case/whitespace-insensitive, drop trailing truncation dots. */
+/**
+ * Normalize a search-result title for dedupe: case/punctuation-insensitive (arXiv titles use ","
+ * where OpenReview uses "&"), drop trailing truncation dots, and strip aggregator site-name
+ * suffixes ("… | alphaXiv", "… – OpenReview", "… - arXiv.gg") so the same document listed on
+ * several sites collapses to one.
+ */
 export function normalizeSearchTitle(raw: string): string {
-	return raw.toLowerCase().replace(/\s+/g, " ").replace(/[.\s]+$/, "").trim();
+	return raw
+		.toLowerCase()
+		.replace(/\s+/g, " ")
+		.replace(/[.\s]+$/, "")
+		.replace(/\s*[|–—]\s+.*$/, "")
+		.replace(/\s+-\s+[a-z0-9][a-z0-9 .]{1,29}$/, "")
+		.replace(/[^a-z0-9]+/g, " ")
+		.replace(/\s+/g, " ")
+		.trim();
 }
 
 /**

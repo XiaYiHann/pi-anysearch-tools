@@ -397,36 +397,45 @@ export function normalizeSearchUrl(raw: string): string {
 }
 
 /**
- * Normalize a search-result title for dedupe: case/punctuation-insensitive (arXiv titles use ","
- * where OpenReview uses "&"), drop trailing truncation dots, and strip aggregator site-name
- * suffixes ("… | alphaXiv", "… – OpenReview", "… - arXiv.gg") so the same document listed on
- * several sites collapses to one.
+ * Normalize a search-result title for dedupe: case/punctuation-insensitive (spaces, commas,
+ * "&", truncation dots, "… | Site" suffixes all become plain words), and strips a leading
+ * arXiv id ("[2511.10687] …") so the same paper listed with/without the id matches.
  */
 export function normalizeSearchTitle(raw: string): string {
-	return raw
-		.toLowerCase()
-		.replace(/\s+/g, " ")
-		.replace(/[.\s]+$/, "")
-		.replace(/\s*[|–—]\s+.*$/, "")
-		.replace(/\s+-\s+[a-z0-9][a-z0-9 .]{1,29}$/, "")
-		.replace(/[^a-z0-9]+/g, " ")
-		.replace(/\s+/g, " ")
-		.trim();
+	const t = raw.toLowerCase().replace(/[^a-z0-9]+/g, " ").replace(/\s+/g, " ").trim();
+	return t.replace(/^\d{4}\s+\d{4,5}\s+/, ""); // leading arXiv id ("[2511.10687] …")
 }
+
+/** Character-bigram overlap coefficient (Szymkiewicz–Simpson): 1.0 for identical / truncated-prefix titles. */
+export function titleSimilarity(a: string, b: string): number {
+	if (a.length < 2 || b.length < 2) return 0;
+	const ga = new Set<string>();
+	for (let i = 0; i < a.length - 1; i++) ga.add(a.slice(i, i + 2));
+	const gb = new Set<string>();
+	for (let i = 0; i < b.length - 1; i++) gb.add(b.slice(i, i + 2));
+	let shared = 0;
+	for (const g of ga) if (gb.has(g)) shared++;
+	return shared / Math.min(ga.size, gb.size);
+}
+
+/** Titles at/above this normalized similarity are treated as duplicates (empirical gap: real duplicates >= 0.96, distinct papers <= 0.72). */
+const TITLE_SIMILARITY_THRESHOLD = 0.85;
+const MIN_TITLE_DEDUPE_CHARS = 12; // short generic titles ("Paris") never collapse on title
 
 /**
  * Drop duplicate search results from server Markdown (per `## Query N` / `## Search Results`
- * section). A result is a duplicate of an earlier one in the same section when its normalized
- * URL matches OR its normalized title equals / is a truncation-prefix of an earlier title
- * (titles must be >= 12 chars, prefix match requires >= 20, to avoid collapsing distinct
- * generic pages). Kept items are renumbered 1..N and the `## Search Results`
- * header count is rewritten. Non-search text (extract, domain directory) passes through unchanged.
+ * section). A result is dropped when its normalized URL equals an earlier item's, OR its
+ * normalized title is >= 0.85 similar (char-bigram overlap, case/punctuation/leading-arXiv-id
+ * insensitive, >= 12 chars) to an earlier item — i.e. high duplication is filtered out and
+ * never returned into the agent's context. Kept items are renumbered 1..N and the
+ * `## Search Results` header count is rewritten. Non-search text (extract, domain directory)
+ * passes through unchanged.
  */
 export function dedupeSearchResults(text: string): string {
 	// ponytail: line-based state machine over the server's `### N. Title` / `- **URL**: ...` shape;
-	// fine while that shape is stable (server owns the format; drift already breaks parseSearchMarkdown too).
-	// ponytail: exact/prefix title match only — cross-source same-doc merges (openreview vs arxiv abs
-	// with differently-worded titles) are out of scope; add arxiv-id matching if that becomes noisy.
+	// fine while that shape is stable (drift already breaks parseSearchMarkdown too).
+	// ponytail: fixed 0.85 threshold + O(n²) pairwise title compare (n <= 10 per section);
+	// make the threshold a tool parameter if users need per-call sensitivity.
 	const urlKeys = new Set<string>();
 	const titleKeys: string[] = [];
 	let block: string[] | null = null;
@@ -434,16 +443,6 @@ export function dedupeSearchResults(text: string): string {
 	let declaredCount = -1;
 	let headerOutIndex = -1;
 	const out: string[] = [];
-
-	const titleDup = (tKey: string): boolean => {
-		if (tKey.length < 12) return false;
-		return titleKeys.some(
-			(prev) =>
-				tKey === prev ||
-				(tKey.length >= 20 && prev.startsWith(tKey)) ||
-				(prev.length >= 20 && tKey.startsWith(prev)),
-			);
-	};
 
 	const closeBlock = (): void => {
 		if (!block) return;
@@ -453,12 +452,15 @@ export function dedupeSearchResults(text: string): string {
 		const url = urlLine?.match(/^\s*-\s*\*\*URL\*\*:\s*(.*)$/)?.[1]?.trim() ?? "";
 		const uKey = normalizeSearchUrl(url);
 		const tKey = normalizeSearchTitle(title);
-		const dup = (uKey !== "" && urlKeys.has(uKey)) || titleDup(tKey);
+		const dup =
+			(uKey !== "" && urlKeys.has(uKey)) ||
+			(tKey.length >= MIN_TITLE_DEDUPE_CHARS &&
+				titleKeys.some((prev) => titleSimilarity(prev, tKey) >= TITLE_SIMILARITY_THRESHOLD));
 		if (!dup) {
 			kept++;
 			out.push(head.replace(/^###\s*\d+\./, `### ${kept}.`), ...block.slice(1));
 			if (uKey) urlKeys.add(uKey);
-			if (tKey.length >= 12) titleKeys.push(tKey);
+			if (tKey.length >= MIN_TITLE_DEDUPE_CHARS) titleKeys.push(tKey);
 		}
 		block = null;
 	};

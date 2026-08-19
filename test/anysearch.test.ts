@@ -19,6 +19,7 @@ import {
 	invalidateConfigCache,
 	resolveApiKey,
 	searchAnySearch,
+	titleSimilarity,
 } from "../anysearch.ts";
 
 // Unit tests run anonymously against an isolated agent dir: the user's env key
@@ -605,18 +606,59 @@ test("dedupeSearchResults collapses aggregator site suffixes (same doc on severa
 	assert.ok(out.includes("(2 results, 100ms)"), "count rewritten");
 });
 
-test("normalizeSearchTitle strips site suffixes, punctuation, and normalizes &/, variants", () => {
-	assert.equal(normalizeSearchTitle("Foo Bar | alphaXiv"), "foo bar");
-	assert.equal(normalizeSearchTitle("Foo Bar – OpenReview"), "foo bar");
-	assert.equal(normalizeSearchTitle("Foo Bar - arXiv.gg"), "foo bar");
-	assert.equal(
-		normalizeSearchTitle("Who Gets the Reward, Who Gets the Blame? Paper"),
-		normalizeSearchTitle("Who Gets the Reward & Who Gets the Blame? Paper | alphaXiv"),
-		"punctuation + suffix variants normalize to one key",
-	);
+test("normalizeSearchTitle is case/punctuation-insensitive and strips leading arXiv ids", () => {
+	assert.equal(normalizeSearchTitle("  Hello   World ... "), "hello world");
+	assert.equal(normalizeSearchTitle("Foo Bar | alphaXiv"), "foo bar alphaxiv");
+	assert.equal(normalizeSearchTitle("[2511.10687] Foo Bar"), "foo bar");
 	assert.equal(
 		normalizeSearchTitle("Shapley-Coop: Emergent Cooperation in Self-Organization"),
 		"shapley coop emergent cooperation in self organization",
+	);
+	assert.equal(
+		normalizeSearchTitle("Who Gets the Reward, Who Gets the Blame? Paper"),
+		normalizeSearchTitle("Who Gets the Reward & Who Gets the Blame? Paper"),
+		"comma/ampersand variants normalize to one key",
+	);
+});
+
+test("titleSimilarity separates high-duplication titles from distinct papers", () => {
+	const t = (s: string): string => normalizeSearchTitle(s);
+	// High duplication (same doc, different wording/wording variants) — dedupe territory.
+	assert.ok(
+		titleSimilarity(
+			t("Who Gets the Reward & Who Gets the Blame? Evaluation-Aligned Training Signals for Multi-LLM Agents - arXiv.gg"),
+			t("Who Gets the Reward, Who Gets the Blame? Evaluation-Aligned Training Signals for Multi-LLM Agents | alphaXiv"),
+		) >= 0.85,
+		"aggregator-suffix variants of the same paper",
+	);
+	assert.ok(
+		titleSimilarity(
+			t("[2511.10687] Who Gets the Reward, Who Gets the Blame? Evaluati..."),
+			t("Who Gets the Reward & Who Gets the Blame? Evaluation-Aligned Training ..."),
+		) >= 0.85,
+		"arXiv-id-prefixed truncated variant",
+	);
+	assert.ok(
+		titleSimilarity(
+			t("Shapley-Coop: Credit Assignment for Emergent ..."),
+			t("Shapley-Coop: Credit Assignment for Emergent Cooperation in Self-Organization"),
+		) >= 0.85,
+		"truncation prefix",
+	);
+	// Distinct papers sharing common words — must stay below the dedupe threshold.
+	assert.ok(
+		titleSimilarity(
+			t("Multi-Agent LLM Systems: From Theory to Practice"),
+			t("Multi-Agent LLM Systems: From Simulation to Real World"),
+		) < 0.85,
+		"common long prefix, different papers",
+	);
+	assert.ok(
+		titleSimilarity(
+			t("Who Gets the Reward & Who Gets the Blame? Evaluation-Aligned Training Signals for Multi-LLM Agents"),
+			t("Who Deserves the Reward? SHARP: Shapley Credit-based Optimization for Multi-Agent System"),
+		) < 0.85,
+		"different papers sharing reward/shapley vocabulary",
 	);
 });
 

@@ -1,8 +1,8 @@
 /**
- * AnySearch API client for the pi-anysearch extension.
+ * AnySearch API client for the pi-anysearch extension (v3 / MCP endpoint).
  *
- * Docs: https://www.anysearch.com/docs#search-api
- * Endpoint: POST https://api.anysearch.com/v1/search
+ * Docs: https://www.anysearch.com/docs — official skill v3.0.1 interface spec.
+ * Endpoint: POST https://api.anysearch.com/mcp (JSON-RPC 2.0, method "tools/call").
  *
  * Auth: `Authorization: Bearer <key>` is optional — anonymous requests work
  * but are rate-limited per IP and metered against the daily free quota.
@@ -12,40 +12,56 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 
-const ANYSEARCH_API_URL = "https://api.anysearch.com/v1/search";
+const ANYSEARCH_MCP_URL = "https://api.anysearch.com/mcp";
 const SEARCH_TIMEOUT_MS = 30_000;
-const MAX_RESULTS = 20;
+const MAX_RESULTS = 10; // server hard cap
 
-/** One result from the AnySearch API. */
-export interface AnySearchResult {
-	title: string;
-	url: string;
-	snippet: string;
-	content: string;
-}
+/** The 17 vertical domains supported by the /mcp search tools. */
+export const DOMAINS = [
+	"general",
+	"resource",
+	"social_media",
+	"finance",
+	"academic",
+	"legal",
+	"health",
+	"business",
+	"security",
+	"ip",
+	"code",
+	"energy",
+	"environment",
+	"agriculture",
+	"travel",
+	"film",
+	"gaming",
+] as const;
 
-export interface AnySearchSearchParams {
+export type AnySearchDomain = (typeof DOMAINS)[number];
+
+/** One argument set for the `search` tool (and for each `batch_search` item). */
+export interface AnySearchParams {
 	query: string;
+	domain?: string;
+	sub_domain?: string;
+	sub_domain_params?: Record<string, string>;
 	max_results?: number;
-	tag?: string;
 	zone?: string;
 	language?: string;
-	params?: Record<string, unknown>;
-	include_content?: boolean;
 }
 
-export interface AnySearchSearchResponse {
+/** Parsed result of a JSON-RPC tools/call against /mcp. */
+export interface McpCallResult {
+	/** First text item of result.content (Markdown). */
 	text: string;
-	details: {
-		results: Array<{
-			title: string;
-			url: string;
-			snippet: string;
-			content?: string;
-		}>;
-		metadata: Record<string, unknown>;
-		apiKeyUsed: boolean;
-	};
+	/** result.isError — true when the server reports an error in-band. */
+	isError: boolean;
+	/** _meta.request_id when present. */
+	requestId?: string;
+	/** auto_registered.api_key when the response carries one. */
+	autoRegisteredApiKey?: string;
+	/** The full JSON-RPC response (raw object, or raw body text when unparseable). */
+	raw: unknown;
 }
 
 /** Config file shape. Located at <agent dir>/anysearch.json. */
@@ -181,17 +197,8 @@ export function resolveApiKey(): string | undefined {
 	return undefined;
 }
 
-function normalizeMaxResults(value: number | undefined): number {
-	if (typeof value !== "number" || !Number.isFinite(value)) return 10;
-	return Math.max(1, Math.min(Math.floor(value), MAX_RESULTS));
-}
-
 function errorMessage(err: unknown): string {
 	return err instanceof Error ? err.message : String(err);
-}
-
-function invalidResponse(message: string): Error {
-	return new Error(`AnySearch API returned invalid response: ${message}`);
 }
 
 function truncate(text: string, maxChars: number): string {
@@ -199,139 +206,230 @@ function truncate(text: string, maxChars: number): string {
 	return `${text.slice(0, maxChars)}… (truncated)`;
 }
 
-/** Validate the API envelope. Throws on malformed payloads. */
-export function parseResponse(value: unknown): { results: AnySearchResult[]; metadata: Record<string, unknown> } {
-	if (!value || typeof value !== "object" || Array.isArray(value)) {
-		throw invalidResponse("expected an object envelope");
-	}
-	const envelope = value as Record<string, unknown>;
-	if (envelope.code !== 0) {
-		throw invalidResponse(`expected code 0, got ${JSON.stringify(envelope.code)}`);
-	}
-	if (!envelope.data || typeof envelope.data !== "object" || Array.isArray(envelope.data)) {
-		throw invalidResponse("expected data object");
-	}
-	const data = envelope.data as Record<string, unknown>;
-	if (!Array.isArray(data.results)) throw invalidResponse("expected data.results array");
-
-	const results: AnySearchResult[] = [];
-	for (const [index, item] of data.results.entries()) {
-		if (!item || typeof item !== "object" || Array.isArray(item)) {
-			throw invalidResponse(`expected data.results[${index}] object`);
-		}
-		const result = item as Record<string, unknown>;
-		const { title, url } = result;
-		if (typeof title !== "string") throw invalidResponse(`expected data.results[${index}].title string`);
-		if (typeof url !== "string" || !url) throw invalidResponse(`expected data.results[${index}].url non-empty string`);
-		// snippet/content are best-effort on the server side and may be missing/null when a page fetch fails.
-		const snippet = typeof result.snippet === "string" ? result.snippet : "";
-		const content = typeof result.content === "string" ? result.content : "";
-		results.push({ title, url, snippet, content });
-	}
-
-	const metadata = data.metadata && typeof data.metadata === "object" && !Array.isArray(data.metadata)
-		? (data.metadata as Record<string, unknown>)
-		: {};
-
-	return { results, metadata };
+/** Clamp max_results into the server-supported 1-10 range (default 10). */
+export function normalizeMaxResults(value: number | undefined): number {
+	if (typeof value !== "number" || !Number.isFinite(value)) return 10;
+	return Math.max(1, Math.min(Math.floor(value), MAX_RESULTS));
 }
 
-function buildText(results: AnySearchResult[], includeContent: boolean): string {
-	if (results.length === 0) return "No results found.";
-	return results
-		.map((result, index) => {
-			const lines = [`${index + 1}. ${result.title}`, `   ${result.url}`];
-			if (result.snippet) lines.push(`   ${result.snippet}`);
-			if (includeContent && result.content) lines.push(`   Content: ${truncate(result.content, 4000)}`);
-			return lines.join("\n");
-		})
-		.join("\n\n");
+/** Build the `arguments` object for the search / batch_search items. */
+export function buildSearchArguments(params: AnySearchParams): Record<string, unknown> {
+	const args: Record<string, unknown> = {
+		query: params.query,
+		max_results: normalizeMaxResults(params.max_results),
+	};
+	if (params.domain) args.domain = params.domain;
+	if (params.sub_domain) args.sub_domain = params.sub_domain;
+	if (params.sub_domain_params) args.sub_domain_params = params.sub_domain_params;
+	if (params.zone) args.zone = params.zone;
+	if (params.language) args.language = params.language;
+	return args;
+}
+
+/** Find a request id in a shallow _meta / request_id field, if present. */
+function findRequestId(node: unknown): string | undefined {
+	if (!node || typeof node !== "object") return undefined;
+	const record = node as Record<string, unknown>;
+	const direct = record.request_id;
+	if (typeof direct === "string") return direct;
+	const meta = record._meta;
+	if (meta && typeof meta === "object") {
+		const metaId = (meta as Record<string, unknown>).request_id;
+		if (typeof metaId === "string") return metaId;
+	}
+	return undefined;
 }
 
 /**
- * Run a search against the AnySearch API.
- * Throws a descriptive Error on API or network failure.
+ * Extract an auto-registered API key from a quota-exhaustion response.
+ * The documented shape is result.auto_registered.api_key (object with `key`,
+ * or a bare string); the key may also be embedded in the response text.
  */
-export async function searchAnySearch(
-	params: AnySearchSearchParams,
-	signal?: AbortSignal,
-): Promise<AnySearchSearchResponse> {
-	const apiKey = resolveApiKey();
-	const numResults = normalizeMaxResults(params.max_results);
+export function extractAutoRegisteredKey(structured: unknown, text: string): string | undefined {
+	/** Walk the documented shapes: key string, api_key (string | {key}), auto_registered (object). */
+	const fromKeyNode = (node: unknown): string | undefined => {
+		if (typeof node === "string") return node.startsWith("as_sk_") ? node : undefined;
+		if (!node || typeof node !== "object") return undefined;
+		const record = node as Record<string, unknown>;
+		const direct = typeof record.key === "string" && record.key.startsWith("as_sk_") ? record.key : undefined;
+		return direct ?? fromKeyNode(record.api_key) ?? fromKeyNode(record.auto_registered);
+	};
+	const fromStructured = fromKeyNode(structured);
+	if (fromStructured) return fromStructured;
+	if (text && text.includes("auto_registered")) {
+		const match = text.match(/as_sk_[A-Za-z0-9_-]{8,}/);
+		if (match) return match[0];
+	}
+	return undefined;
+}
 
-	const body: Record<string, unknown> = { query: params.query, max_results: numResults };
-	if (params.tag) body.tag = params.tag;
-	if (params.zone) body.zone = params.zone;
-	if (params.language) body.language = params.language;
-	if (params.params && typeof params.params === "object") body.params = params.params;
+let rpcId = 0;
+
+/**
+ * Call one AnySearch MCP tool (JSON-RPC 2.0 tools/call) against /mcp.
+ * Throws a descriptive Error on network/HTTP/JSON-RPC failure; in-band tool
+ * errors are returned via isError + text.
+ */
+export async function callMcpTool(
+	toolName: string,
+	args: Record<string, unknown>,
+	signal?: AbortSignal,
+): Promise<McpCallResult> {
+	const apiKey = resolveApiKey();
+	const body = {
+		jsonrpc: "2.0",
+		id: ++rpcId,
+		method: "tools/call",
+		params: { name: toolName, arguments: args },
+	};
 
 	const timeoutSignal = AbortSignal.timeout(SEARCH_TIMEOUT_MS);
 	const requestSignal = signal ? AbortSignal.any([timeoutSignal, signal]) : timeoutSignal;
 
 	let response: Response;
 	try {
-		response = await fetch(ANYSEARCH_API_URL, {
+		response = await fetch(ANYSEARCH_MCP_URL, {
 			method: "POST",
 			headers: {
-				...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
+				Accept: "application/json, text/event-stream",
 				"Content-Type": "application/json",
+				...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
 			},
 			body: JSON.stringify(body),
 			signal: requestSignal,
 		});
 	} catch (err) {
 		const message = errorMessage(err);
-		if (message.toLowerCase().includes("abort")) throw new Error("AnySearch request was cancelled or timed out");
+		if (message.toLowerCase().includes("abort")) {
+			throw new Error("AnySearch request was cancelled or timed out");
+		}
 		throw new Error(`AnySearch request failed: ${message}`);
 	}
 
+	const rawText = await response.text().catch(() => "");
+	let raw: unknown;
+	try {
+		raw = rawText ? JSON.parse(rawText) : {};
+	} catch {
+		raw = rawText;
+	}
+
 	if (!response.ok) {
-		let detail = "";
-		try {
-			const raw = await response.json();
-			const envelope = raw as { message?: unknown; request_id?: unknown; data?: { retry_after?: unknown } };
-			detail = typeof envelope.message === "string" ? envelope.message : JSON.stringify(raw);
-			if (envelope.request_id !== undefined) detail += ` (request_id: ${String(envelope.request_id)})`;
-			if (response.status === 429 && envelope.data && typeof envelope.data === "object") {
-				const retryAfter = (envelope.data as { retry_after?: unknown }).retry_after;
-				if (retryAfter !== undefined) detail += ` (retry_after: ${String(retryAfter)})`;
-			}
-		} catch {
-			detail = truncate(await response.text().catch(() => ""), 300);
-		}
+		const envelope = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
+		const requestId = findRequestId(envelope) ?? findRequestId(envelope.error);
+		const detail =
+			typeof raw === "string"
+				? truncate(raw, 300)
+				: truncate(JSON.stringify(envelope.error ?? envelope ?? raw) || "", 300);
 		const retryAfterHeader = response.headers.get("retry-after");
-		const hint = retryAfterHeader ? ` Retry-After: ${retryAfterHeader}s.` : "";
-		throw new Error(`AnySearch API error ${response.status}: ${detail || "unknown error"}.${hint}`);
+		const retryHint = retryAfterHeader ? ` Retry-After: ${retryAfterHeader}s.` : "";
+		const requestHint = requestId ? ` (request_id: ${requestId})` : "";
+		throw new Error(`AnySearch API error ${response.status}: ${detail || "unknown error"}.${requestHint}${retryHint}`);
 	}
 
-	let rawData: unknown;
-	try {
-		rawData = await response.json();
-	} catch (err) {
-		throw new Error(`AnySearch API returned invalid JSON: ${errorMessage(err)}`);
+	const envelope = raw && typeof raw === "object" && !Array.isArray(raw) ? (raw as Record<string, unknown>) : {};
+
+	// JSON-RPC-level error (protocol or tool dispatch failure).
+	if (envelope.error && typeof envelope.error === "object") {
+		const rpcError = envelope.error as Record<string, unknown>;
+		const requestId = findRequestId(envelope) ?? findRequestId(rpcError);
+		const requestHint = requestId ? ` (request_id: ${requestId})` : "";
+		throw new Error(
+			`AnySearch API error: ${typeof rpcError.message === "string" ? rpcError.message : JSON.stringify(rpcError)}${requestHint}`,
+		);
 	}
 
-	let parsed: ReturnType<typeof parseResponse>;
-	try {
-		parsed = parseResponse(rawData);
-	} catch (err) {
-		throw new Error(errorMessage(err));
+	const result = envelope.result;
+	if (!result || typeof result !== "object" || Array.isArray(result)) {
+		throw new Error(`AnySearch API returned invalid response: missing result object${responseHint(envelope)}`);
 	}
-
-	const results = parsed.results.slice(0, numResults);
-	const includeContent = params.include_content === true;
+	const resultRecord = result as Record<string, unknown>;
+	const content = Array.isArray(resultRecord.content) ? resultRecord.content : [];
+	const firstText = content.find(
+		(item): item is { type: string; text: string } =>
+			!!item &&
+			typeof item === "object" &&
+			typeof (item as Record<string, unknown>).type === "string" &&
+			typeof (item as Record<string, unknown>).text === "string",
+	);
+	const text = firstText ? firstText.text : "";
+	const requestId = findRequestId(resultRecord._meta) ?? findRequestId(resultRecord);
+	const isError = resultRecord.isError === true;
+	if (!isError && !firstText) {
+		throw new Error(`AnySearch API returned invalid response: empty content${requestId ? ` (request_id: ${requestId})` : ""}`);
+	}
+	const autoRegisteredApiKey = extractAutoRegisteredKey(resultRecord, text) ?? extractAutoRegisteredKey(envelope, text);
 
 	return {
-		text: buildText(results, includeContent),
-		details: {
-			results: results.map((result) => ({
-				title: result.title,
-				url: result.url,
-				snippet: result.snippet,
-				...(includeContent ? { content: result.content } : {}),
-			})),
-			metadata: parsed.metadata,
-			apiKeyUsed: Boolean(apiKey),
-		},
+		text,
+		isError,
+		...(requestId ? { requestId } : {}),
+		...(autoRegisteredApiKey ? { autoRegisteredApiKey } : {}),
+		raw,
 	};
+}
+
+function responseHint(envelope: Record<string, unknown>): string {
+	const requestId = findRequestId(envelope);
+	return requestId ? ` (request_id: ${requestId})` : "";
+}
+
+/** Run a single search (general or vertical) via the search tool. */
+export async function searchAnySearch(
+	params: AnySearchParams,
+	signal?: AbortSignal,
+): Promise<McpCallResult> {
+	if (!params.query || !params.query.trim()) throw new Error("query is required");
+	return callMcpTool("search", buildSearchArguments(params), signal);
+}
+
+/** Run 2-5 searches in one batch_search call; a single failure does not block the rest. */
+export async function batchSearchAnySearch(
+	queries: AnySearchParams[],
+	signal?: AbortSignal,
+): Promise<McpCallResult> {
+	if (!Array.isArray(queries) || queries.length < 1 || queries.length > 5) {
+		throw new Error("batch_search requires 1-5 queries");
+	}
+	const items = queries.map((item) => {
+		if (!item.query || !item.query.trim()) throw new Error("each batch_search query item requires a non-empty query");
+		return buildSearchArguments(item);
+	});
+	return callMcpTool("batch_search", { queries: items }, signal);
+}
+
+/** Fetch a URL's full page content as Markdown (server truncates at 50k chars). */
+export async function extractAnySearch(url: string, signal?: AbortSignal): Promise<McpCallResult> {
+	if (!/^https?:\/\//i.test(url)) throw new Error("url must start with http:// or https://");
+	return callMcpTool("extract", { url }, signal);
+}
+
+/** Session-level cache for get_sub_domains results (keyed by normalized domain set). */
+const subDomainCache = new Map<string, McpCallResult>();
+
+/** Drop the get_sub_domains session cache (test hook). */
+export function clearSubDomainCache(): void {
+	subDomainCache.clear();
+}
+
+/**
+ * Query the vertical domain directory. `domains` (array, max 5) takes priority
+ * over `domain`. Results are cached per session for the same domain set.
+ */
+export async function getSubDomainsAnySearch(
+	opts: { domain?: string; domains?: string[] },
+	signal?: AbortSignal,
+): Promise<McpCallResult> {
+	const domains = opts.domains && opts.domains.length > 0 ? opts.domains : opts.domain ? [opts.domain] : undefined;
+	if (!domains || domains.length === 0) throw new Error("get_sub_domains requires domain or domains");
+	if (domains.length > 5) throw new Error("get_sub_domains accepts at most 5 domains");
+	for (const domain of domains) {
+		if (!DOMAINS.includes(domain as AnySearchDomain)) throw new Error(`unknown domain: ${domain}`);
+	}
+	const cacheKey = domains.slice().sort().join(",");
+	const cached = subDomainCache.get(cacheKey);
+	if (cached) return cached;
+	const result = await callMcpTool("get_sub_domains", { domains }, signal);
+	if (!result.isError) subDomainCache.set(cacheKey, result);
+	return result;
 }

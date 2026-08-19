@@ -76,9 +76,13 @@ const SEARCH_ITEM_PARAMETERS = {
 		Type.Integer({ minimum: 1, maximum: 10, description: "Number of results to return (1-10, default 10)" }),
 	),
 	zone: Type.Optional(
-		StringEnum(["cn", "intl"] as const, { description: 'Region for the search: "cn" or "intl"' }),
+		StringEnum(["cn", "intl"] as const, {
+			description: 'Region for the search: "cn" or "intl" (deprecated: still forwarded for backward compat, server may ignore)',
+		}),
 	),
-	language: Type.Optional(Type.String({ description: "Preferred language, e.g. zh-CN or en" })),
+	language: Type.Optional(
+		Type.String({ description: "Preferred language, e.g. zh-CN or en (deprecated: still forwarded for backward compat, server may ignore)" }),
+	),
 };
 const SEARCH_PARAMETERS = Type.Object({
 	query: SEARCH_ITEM_PARAMETERS.query,

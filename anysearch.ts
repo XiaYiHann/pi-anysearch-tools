@@ -13,6 +13,7 @@ import { dirname, join } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 
 const ANYSEARCH_MCP_URL = "https://api.anysearch.com/mcp";
+const ANYSEARCH_CLIENT = "pi-anysearch-tools/0.2.1"; // ponytail: static version for X-Anysearch-Client, bump when package.json bumps (telemetry parity with skill/3.0.1)
 const SEARCH_TIMEOUT_MS = 30_000;
 const MAX_RESULTS = 10; // server hard cap
 
@@ -46,6 +47,9 @@ export interface AnySearchParams {
 	sub_domain?: string;
 	sub_domain_params?: Record<string, string>;
 	max_results?: number;
+	// ponytail: zone/language removed from official v3 search schema (v2.1.0) but
+	// kept here and still forwarded — live probe (2026) shows server still accepts
+	// them (200 OK) for backward compat; server may ignore. Do not break callers.
 	zone?: string;
 	language?: string;
 }
@@ -293,6 +297,7 @@ export async function callMcpTool(
 			headers: {
 				Accept: "application/json, text/event-stream",
 				"Content-Type": "application/json",
+				"X-Anysearch-Client": ANYSEARCH_CLIENT,
 				...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
 			},
 			body: JSON.stringify(body),

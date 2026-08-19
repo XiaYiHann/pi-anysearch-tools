@@ -247,6 +247,33 @@ export function parseSearchMarkdown(text: string): ParsedSearchSection[] | undef
 	return sections.some((s) => s.items.length > 0) ? sections : undefined;
 }
 
+interface ParsedExtractMeta {
+	source?: string;
+	title?: string;
+}
+
+/**
+ * Pull the source URL and page title out of /mcp extract text. The server
+ * format: optional "> **External page content (untrusted):** ..." warning,
+ * "## <title>" heading, "**Source**: <url>" line. Returns an empty object
+ * when nothing matches.
+ */
+export function parseExtractMeta(text: string): ParsedExtractMeta {
+	const meta: ParsedExtractMeta = {};
+	for (const line of text.split("\n")) {
+		if (!meta.source) {
+			const sourceMatch = line.match(/^\*\*Source\*\*:\s*(\S+)/);
+			if (sourceMatch) meta.source = sourceMatch[1];
+		}
+		if (!meta.title) {
+			const titleMatch = line.match(/^#{1,6}\s+(\S.*)$/);
+			if (titleMatch && !line.startsWith(">")) meta.title = titleMatch[1].trim();
+		}
+		if (meta.source && meta.title) break;
+	}
+	return meta;
+}
+
 interface ParsedDomainDirectory {
 	domain: string;
 	count?: string;
@@ -308,7 +335,7 @@ async function handleAutoRegistered(result: McpCallResult, ctx: ExtensionContext
 	);
 }
 
-function makeRenderResult(toolLabel: string, kind: "search" | "domains" | "raw" = "search") {
+function makeRenderResult(toolLabel: string, kind: "search" | "domains" | "extract") {
 	return (
 		result: ToolResultLike,
 		{ expanded, isPartial }: RenderResultOptions,
@@ -332,6 +359,24 @@ function makeRenderResult(toolLabel: string, kind: "search" | "domains" | "raw" 
 		const mode = result.details?.mode === "configured" ? "configured" : "anonymous";
 		const requestId = result.details?.requestId ? ` · request_id: ${result.details.requestId}` : "";
 		const footer = theme.fg("dim", `mode: ${mode}${requestId}`);
+		if (kind === "extract" && !expanded && text.length > COLLAPSED_CHAR_LIMIT) {
+			const meta = parseExtractMeta(text);
+			let host = "";
+			try {
+				host = new URL(meta.source ?? "").hostname;
+			} catch {
+				/* non-URL source */
+			}
+			const headerLine = theme.fg(
+				"toolTitle",
+				theme.bold(`AnySearch Extract${host ? ` · ${host}` : ""}`),
+			);
+			const lines: string[] = [];
+			if (meta.title) lines.push(theme.fg("accent", meta.title));
+			lines.push(theme.fg("dim", `… ${text.length.toLocaleString("en-US")} chars of page content (expand to view full content)`));
+			lines.push(footer);
+			return new Text(`${headerLine}\n${lines.join("\n")}`, 0, 0);
+		}
 		if (kind === "domains") {
 			const domains = parseDomainDirectory(text);
 			if (domains) {
@@ -350,12 +395,17 @@ function makeRenderResult(toolLabel: string, kind: "search" | "domains" | "raw" 
 				return new Text(`${headerLine}\n${lines.join("\n")}\n${footer}`, 0, 0);
 			}
 		}
-		const parsed = kind === "raw" ? undefined : parseSearchMarkdown(text);
+		const parsed = kind === "extract" ? undefined : parseSearchMarkdown(text);
 		if (parsed) {
 			const total = parsed.reduce((n, s) => n + s.items.length, 0);
 			if (total > 0 || parsed.some((s) => s.note)) {
 				const multi = parsed.length > 1;
-				const singleMeta = !multi && parsed[0].meta ? ` (${parsed[0].meta})` : "";
+				let singleMeta = "";
+				if (!multi && parsed[0].meta) {
+					// The count is already in the header; keep only the timing part.
+					const rest = parsed[0].meta.split(",").slice(1).join(",").trim();
+					singleMeta = rest ? ` (${rest})` : "";
+				}
 				const header = theme.fg(
 					"toolTitle",
 					theme.bold(
@@ -506,7 +556,7 @@ export default function anysearchExtension(pi: ExtensionAPI) {
 			return new Text(text, 0, 0);
 		},
 
-		renderResult: makeRenderResult("AnySearch extract", "raw"),
+		renderResult: makeRenderResult("AnySearch Extract", "extract"),
 	});
 
 	pi.registerTool<typeof SUB_DOMAINS_PARAMETERS, AnySearchToolDetails | undefined>({

@@ -3,12 +3,12 @@
   "id": 2,
   "result": {
     "_meta": {
-      "request_id": "58dadbba-440c-4849-9cf6-5597dc75f70d"
+      "request_id": "266e5b17-e147-458a-aaa3-3a8d781e4ddd"
     },
     "content": [
       {
         "type": "text",
-        "text": "## Search Results (3 results, 1465ms)\n\n### 1. Apple Inc. (AAPL)\n- **URL**: https://site.financialmodelingprep.com/?ref=quote-AAPL\n- Symbol: AAPL | Name: Apple Inc. | Exchange: NASDAQ | Price: 310.03 | Open: 307.53 | PrevClose: 305.59 | Change: +4.44 | Change%: +1.45% | DayHigh: 311.49 | DayLow: 305.74 | YearHigh: 344.57 | YearLow: 223.78 | Volume: 46451172 | MarketCap: 4553520980680 | Avg50: 309.13 | Avg200: 280.87\n\n### 2. LS 1x Apple Tracker ETC (AAPL.L)\n- **URL**: https://site.financialmodelingprep.com/?ref=quote-AAPL.L\n- Symbol: AAPL.L | Name: LS 1x Apple Tracker ETC | Exchange: LSE | Price: 672.65 | Open: 0.00 | PrevClose: 637.67 | Change: +34.98 | Change%: +5.48% | DayHigh: 672.65 | DayLow: 672.65 | YearHigh: 672.65 | YearLow: 672.65 | Volume: 49 | MarketCap: 0 | Avg50: 0.00 | Avg200: 0.00\n\n### 3. Apple Inc. (AAPL.DE)\n- **URL**: https://site.financialmodelingprep.com/?ref=quote-AAPL.DE\n- Symbol: AAPL.DE | Name: Apple Inc. | Exchange: XETRA | Price: 0.00 | Open: 0.00 | PrevClose: 0.00 | Change: +0.00 | Change%: +0.00% | DayHigh: 0.00 | DayLow: 0.00 | YearHigh: 0.00 | YearLow: 0.00 | Volume: 0 | MarketCap: 0 | Avg50: 0.00 | Avg200: 0.00\n"
+        "text": "## Search Results (3 results, 1461ms)\n\n### 1. Apple Inc. (AAPL)\n- **URL**: https://site.financialmodelingprep.com/?ref=quote-AAPL\n- Symbol: AAPL | Name: Apple Inc. | Exchange: NASDAQ | Price: 310.03 | Open: 307.53 | PrevClose: 305.59 | Change: +4.44 | Change%: +1.45% | DayHigh: 311.49 | DayLow: 305.74 | YearHigh: 344.57 | YearLow: 223.78 | Volume: 46451172 | MarketCap: 4553520980680 | Avg50: 309.13 | Avg200: 280.87\n\n### 2. LS 1x Apple Tracker ETC (AAPL.L)\n- **URL**: https://site.financialmodelingprep.com/?ref=quote-AAPL.L\n- Symbol: AAPL.L | Name: LS 1x Apple Tracker ETC | Exchange: LSE | Price: 672.65 | Open: 0.00 | PrevClose: 637.67 | Change: +34.98 | Change%: +5.48% | DayHigh: 672.65 | DayLow: 672.65 | YearHigh: 672.65 | YearLow: 672.65 | Volume: 49 | MarketCap: 0 | Avg50: 0.00 | Avg200: 0.00\n\n### 3. Apple Inc. (AAPL.DE)\n- **URL**: https://site.financialmodelingprep.com/?ref=quote-AAPL.DE\n- Symbol: AAPL.DE | Name: Apple Inc. | Exchange: XETRA | Price: 0.00 | Open: 0.00 | PrevClose: 0.00 | Change: +0.00 | Change%: +0.00% | DayHigh: 0.00 | DayLow: 0.00 | YearHigh: 0.00 | YearLow: 0.00 | Volume: 0 | MarketCap: 0 | Avg50: 0.00 | Avg200: 0.00\n"
       }
     ]
   }

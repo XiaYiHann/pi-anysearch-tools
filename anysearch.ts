@@ -379,13 +379,112 @@ function responseHint(envelope: Record<string, unknown>): string {
 	return requestId ? ` (request_id: ${requestId})` : "";
 }
 
+/** Normalize a search-result URL for dedupe: scheme/www/trailing-slash/case-insensitive, drop hash and tracking params. */
+export function normalizeSearchUrl(raw: string): string {
+	if (!raw) return "";
+	try {
+		const u = new URL(raw);
+		u.hash = "";
+		for (const p of ["utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content", "fbclid", "gclid", "ref", "ref_src"]) {
+			u.searchParams.delete(p);
+		}
+		let s = u.host + u.pathname + (u.search || "").replace(/(%2[fF]|\/)+$/, "");
+		if (s.startsWith("www.")) s = s.slice(4);
+		return s.replace(/\/+$/, "").toLowerCase();
+	} catch {
+		return raw.trim().toLowerCase().replace(/^[a-z][a-z0-9+.-]*:\/\//, "").replace(/\/+$/, "");
+	}
+}
+
+/** Normalize a search-result title for dedupe: case/whitespace-insensitive, drop trailing truncation dots. */
+export function normalizeSearchTitle(raw: string): string {
+	return raw.toLowerCase().replace(/\s+/g, " ").replace(/[.\s]+$/, "").trim();
+}
+
+/**
+ * Drop duplicate search results from server Markdown (per `## Query N` / `## Search Results`
+ * section). A result is a duplicate of an earlier one in the same section when its normalized
+ * URL matches OR its normalized title matches (titles must be >= 12 chars to avoid collapsing
+ * distinct generic pages). Kept items are renumbered 1..N and the `## Search Results`
+ * header count is rewritten. Non-search text (extract, domain directory) passes through unchanged.
+ */
+export function dedupeSearchResults(text: string): string {
+	// ponytail: line-based state machine over the server's `### N. Title` / `- **URL**: ...` shape;
+	// fine while that shape is stable (server owns the format; drift already breaks parseSearchMarkdown too).
+	const urlKeys = new Set<string>();
+	const titleKeys = new Set<string>();
+	let block: string[] | null = null;
+	let kept = 0;
+	let declaredCount = -1;
+	let headerOutIndex = -1;
+	const out: string[] = [];
+
+	const closeBlock = (): void => {
+		if (!block) return;
+		const head = block[0];
+		const title = head.match(/^###\s*\d+\.\s*(.*)$/)?.[1]?.trim() ?? "";
+		const urlLine = block.find((l) => /^\s*-\s*\*\*URL\*\*:\s*/.test(l));
+		const url = urlLine?.match(/^\s*-\s*\*\*URL\*\*:\s*(.*)$/)?.[1]?.trim() ?? "";
+		const uKey = normalizeSearchUrl(url);
+		const tKey = normalizeSearchTitle(title);
+		const dup = (uKey !== "" && urlKeys.has(uKey)) || (tKey.length >= 12 && titleKeys.has(tKey));
+		if (!dup) {
+			kept++;
+			out.push(head.replace(/^###\s*\d+\./, `### ${kept}.`), ...block.slice(1));
+			if (uKey) urlKeys.add(uKey);
+			if (tKey.length >= 12) titleKeys.add(tKey);
+		}
+		block = null;
+	};
+
+	const endSection = (): void => {
+		if (headerOutIndex >= 0 && declaredCount >= 0 && kept < declaredCount) {
+			out[headerOutIndex] = out[headerOutIndex].replace(
+				`(${declaredCount} results`,
+				`(${kept} results`,
+			);
+			}
+		headerOutIndex = -1;
+		declaredCount = -1;
+	};
+
+	for (const line of text.split("\n")) {
+		if (/^###\s*\d+\.\s/.test(line)) {
+			closeBlock();
+			block = [line];
+			continue;
+		}
+		if (/^##\s/.test(line)) {
+			closeBlock();
+			endSection();
+			kept = 0;
+			urlKeys.clear();
+			titleKeys.clear();
+			const count = line.match(/^## Search Results \((\d+) results/);
+			if (count) {
+				declaredCount = Number(count[1]);
+				headerOutIndex = out.length;
+			}
+			out.push(line);
+			continue;
+		}
+		if (block) block.push(line);
+		else out.push(line);
+	}
+	closeBlock();
+	endSection();
+	return out.join("\n");
+}
+
 /** Run a single search (general or vertical) via the search tool. */
 export async function searchAnySearch(
 	params: AnySearchParams,
 	signal?: AbortSignal,
 ): Promise<McpCallResult> {
 	if (!params.query || !params.query.trim()) throw new Error("query is required");
-	return callMcpTool("search", buildSearchArguments(params), signal);
+	const result = await callMcpTool("search", buildSearchArguments(params), signal);
+	if (!result.isError) result.text = dedupeSearchResults(result.text);
+	return result;
 }
 
 /** Run 2-5 searches in one batch_search call; a single failure does not block the rest. */
@@ -400,7 +499,9 @@ export async function batchSearchAnySearch(
 		if (!item.query || !item.query.trim()) throw new Error("each batch_search query item requires a non-empty query");
 		return buildSearchArguments(item);
 	});
-	return callMcpTool("batch_search", { queries: items }, signal);
+	const result = await callMcpTool("batch_search", { queries: items }, signal);
+	if (!result.isError) result.text = dedupeSearchResults(result.text);
+	return result;
 }
 
 /** Fetch a URL's full page content as Markdown (server truncates at 50k chars). */

@@ -9,10 +9,13 @@ import {
 	buildSearchArguments,
 	callMcpTool,
 	clearSubDomainCache,
+	dedupeSearchResults,
 	extractAnySearch,
 	extractAutoRegisteredKey,
 	getSubDomainsAnySearch,
 	normalizeMaxResults,
+	normalizeSearchTitle,
+	normalizeSearchUrl,
 	invalidateConfigCache,
 	resolveApiKey,
 	searchAnySearch,
@@ -489,6 +492,104 @@ test("parseSearchMarkdown parses single and batch search text into sections", ()
 	// Non-listing text (extract / domain directory) falls back to raw text.
 	assert.equal(parseSearchMarkdown("## Example Domain\n\n**Source**: https://example.com"), undefined);
 	assert.equal(parseSearchMarkdown("### finance.calendar\nEarnings dates"), undefined);
+});
+
+test("normalizeSearchUrl/normalizeSearchTitle normalize for dedupe", () => {
+	assert.equal(normalizeSearchUrl("https://www.Example.com/a/b/?utm_source=x&k=1#top"), "example.com/a/b/?k=1");
+	assert.equal(normalizeSearchUrl("http://www.openreview.net/forum?id=abc/"), "openreview.net/forum?id=abc");
+	assert.equal(normalizeSearchUrl("not a url"), "not a url");
+	assert.equal(normalizeSearchUrl(""), "");
+	assert.equal(normalizeSearchTitle("  Hello   World ... "), "hello world");
+});
+
+test("dedupeSearchResults collapses duplicate URL/title results and renumbers", () => {
+	const md = [
+		"## Search Results (4 results, 1409ms)",
+		"",
+		"### 1. Who Gets the Reward & Who Gets the Blame? Evaluation-Aligned Training ...",
+		"- **URL**: https://openreview.net/forum?id=abc123&utm_source=twitter",
+		"- snippet one",
+		"",
+		"### 2. Who Gets the Reward & Who Gets the Blame? Evaluation-Aligned Training ...",
+		"- **URL**: http://www.openreview.net/forum?id=abc123/",
+		"- snippet two",
+		"",
+		"### 3. Who Gets the Reward & Who Gets the Blame? Evaluation-Aligned Training ...",
+		"- **URL**: https://arxiv.org/abs/2511.10687",
+		"- snippet three",
+		"",
+		"### 4. Distinct result",
+		"- **URL**: https://example.com/other",
+		"- snippet four",
+	].join("\n");
+	const out = dedupeSearchResults(md);
+	// Item 2: URL duplicate (scheme/www/tracking/trailing slash). Item 3: title duplicate.
+	assert.ok(out.includes("### 1. Who Gets the Reward"), "first occurrence kept");
+	assert.ok(out.includes("### 2. Distinct result"), "distinct item renumbered");
+	assert.ok(!out.includes("snippet two"), "URL duplicate dropped");
+	assert.ok(!out.includes("snippet three"), "title duplicate dropped");
+	assert.ok(out.includes("## Search Results (2 results, 1409ms)"), "count rewritten");
+	assert.ok(!out.includes("### 3."), "no stale numbering");
+});
+
+test("dedupeSearchResults scopes per section and keeps short generic titles", () => {
+	const md = [
+		"## Query 1: paris",
+		"",
+		"## Search Results (2 results, 100ms)",
+		"",
+		"### 1. Paris",
+		"- **URL**: https://a.example",
+		"- one",
+		"",
+		"### 2. Paris",
+		"- **URL**: https://b.example",
+		"- two",
+		"",
+		"## Query 2: deep research survey",
+		"",
+		"## Search Results (2 results, 100ms)",
+		"",
+		"### 1. Deep Research Survey Paper",
+		"- **URL**: https://arxiv.org/abs/1",
+		"- three",
+		"",
+		"### 2. Deep Research Survey Paper",
+		"- **URL**: https://openreview.net/abs/2",
+		"- four",
+	].join("\n");
+	const out = dedupeSearchResults(md);
+	assert.ok(out.includes("### 1. Paris") && out.includes("### 2. Paris"), "short titles with distinct URLs stay");
+	assert.ok(!out.includes("- four"), "long-title duplicate collapsed in second section");
+	assert.ok(out.includes("(1 results, 100ms)"), "second section count rewritten");
+});
+
+test("dedupeSearchResults leaves non-search text unchanged", () => {
+	const extract = "## Example Domain\n\n**Source**: https://example.com\n\nThis domain is reserved.";
+	assert.equal(dedupeSearchResults(extract), extract);
+	const directory = "## finance Domain Capabilities (2 available)\n\n### finance.quote\ndesc\n\n### finance.calendar\ndesc";
+	assert.equal(dedupeSearchResults(directory), directory);
+});
+
+test("searchAnySearch dedupes server results in the returned text", async () => {
+	const m = mockFetch(() =>
+		okResult(
+			[
+				"## Search Results (2 results, 50ms)",
+				"### 1. Paris - Wikipedia",
+				"- **URL**: https://en.wikipedia.org/wiki/Paris",
+				"### 2. Paris - Wikipedia",
+				"- **URL**: https://en.wikipedia.org/wiki/Paris?utm_source=web",
+			].join("\n"),
+		),
+	);
+	try {
+		const result = await searchAnySearch({ query: "Paris" });
+		assert.ok(result.text.includes("(1 results"), `count not rewritten: ${result.text}`);
+		assert.ok(!result.text.includes("utm_source"), "duplicate item still present");
+	} finally {
+		m.restore();
+	}
 });
 
 // Restore the user's env after the suite.

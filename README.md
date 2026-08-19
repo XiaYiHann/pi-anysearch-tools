@@ -172,7 +172,7 @@ Returns the vertical domain directory (sub-domains with descriptions and paramet
 
 ## Returned results
 
-Search results are deduplicated per query before being returned: an item whose normalized URL (scheme, `www`, tracking params, trailing slash, case-insensitive) or normalized title (>= 12 chars) matches an earlier item in the same query is dropped, kept items are renumbered, and the `## Search Results` count is rewritten. `anysearch_extract` and `anysearch_get_sub_domains` text passes through untouched.
+Search results are deduplicated per query before being returned: an item whose normalized URL (scheme, `www`, tracking params, trailing slash, case-insensitive) or normalized title (>= 12 chars; truncation-prefix matches at >= 20 chars also collapse) matches an earlier item in the same query is dropped, kept items are renumbered, and the `## Search Results` count is rewritten. `anysearch_extract` and `anysearch_get_sub_domains` text passes through untouched.
 
 Each tool returns the AnySearch response text (Markdown) for the agent, plus structured details containing the response `request_id` (when present) and the auth mode (`anonymous` or `configured`). Details never contain the API key. API and network failures are thrown so Pi can mark the tool result as an error; error messages include the `request_id` when the server provides one.
 

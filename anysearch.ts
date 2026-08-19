@@ -404,20 +404,33 @@ export function normalizeSearchTitle(raw: string): string {
 /**
  * Drop duplicate search results from server Markdown (per `## Query N` / `## Search Results`
  * section). A result is a duplicate of an earlier one in the same section when its normalized
- * URL matches OR its normalized title matches (titles must be >= 12 chars to avoid collapsing
- * distinct generic pages). Kept items are renumbered 1..N and the `## Search Results`
+ * URL matches OR its normalized title equals / is a truncation-prefix of an earlier title
+ * (titles must be >= 12 chars, prefix match requires >= 20, to avoid collapsing distinct
+ * generic pages). Kept items are renumbered 1..N and the `## Search Results`
  * header count is rewritten. Non-search text (extract, domain directory) passes through unchanged.
  */
 export function dedupeSearchResults(text: string): string {
 	// ponytail: line-based state machine over the server's `### N. Title` / `- **URL**: ...` shape;
 	// fine while that shape is stable (server owns the format; drift already breaks parseSearchMarkdown too).
+	// ponytail: exact/prefix title match only — cross-source same-doc merges (openreview vs arxiv abs
+	// with differently-worded titles) are out of scope; add arxiv-id matching if that becomes noisy.
 	const urlKeys = new Set<string>();
-	const titleKeys = new Set<string>();
+	const titleKeys: string[] = [];
 	let block: string[] | null = null;
 	let kept = 0;
 	let declaredCount = -1;
 	let headerOutIndex = -1;
 	const out: string[] = [];
+
+	const titleDup = (tKey: string): boolean => {
+		if (tKey.length < 12) return false;
+		return titleKeys.some(
+			(prev) =>
+				tKey === prev ||
+				(tKey.length >= 20 && prev.startsWith(tKey)) ||
+				(prev.length >= 20 && tKey.startsWith(prev)),
+			);
+	};
 
 	const closeBlock = (): void => {
 		if (!block) return;
@@ -427,12 +440,12 @@ export function dedupeSearchResults(text: string): string {
 		const url = urlLine?.match(/^\s*-\s*\*\*URL\*\*:\s*(.*)$/)?.[1]?.trim() ?? "";
 		const uKey = normalizeSearchUrl(url);
 		const tKey = normalizeSearchTitle(title);
-		const dup = (uKey !== "" && urlKeys.has(uKey)) || (tKey.length >= 12 && titleKeys.has(tKey));
+		const dup = (uKey !== "" && urlKeys.has(uKey)) || titleDup(tKey);
 		if (!dup) {
 			kept++;
 			out.push(head.replace(/^###\s*\d+\./, `### ${kept}.`), ...block.slice(1));
 			if (uKey) urlKeys.add(uKey);
-			if (tKey.length >= 12) titleKeys.add(tKey);
+			if (tKey.length >= 12) titleKeys.push(tKey);
 		}
 		block = null;
 	};
@@ -459,7 +472,7 @@ export function dedupeSearchResults(text: string): string {
 			endSection();
 			kept = 0;
 			urlKeys.clear();
-			titleKeys.clear();
+			titleKeys.length = 0;
 			const count = line.match(/^## Search Results \((\d+) results/);
 			if (count) {
 				declaredCount = Number(count[1]);

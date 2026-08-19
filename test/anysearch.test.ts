@@ -564,6 +564,24 @@ test("dedupeSearchResults scopes per section and keeps short generic titles", ()
 	assert.ok(out.includes("(1 results, 100ms)"), "second section count rewritten");
 });
 
+test("dedupeSearchResults collapses truncation-prefix titles (same doc, truncated differently)", () => {
+	const md = [
+		"## Search Results (2 results, 100ms)",
+		"",
+		"### 1. Shapley-Coop: Credit Assignment for Emergent ...",
+		"- **URL**: https://openreview.net/pdf?id=HnJ1UkuJXS",
+		"- one",
+		"",
+		"### 2. Shapley-Coop: Credit Assignment for Emergent Cooperation in ...",
+		"- **URL**: https://openreview.net/pdf/b766f8bc0602b07837d552dd7f04168535c02370.pdf",
+		"- two",
+	].join("\n");
+	const out = dedupeSearchResults(md);
+	assert.ok(out.includes("### 1. Shapley-Coop"), "first kept");
+	assert.ok(!out.includes("- two"), "truncation-prefix title duplicate dropped");
+	assert.ok(out.includes("(1 results, 100ms)"), "count rewritten");
+});
+
 test("dedupeSearchResults leaves non-search text unchanged", () => {
 	const extract = "## Example Domain\n\n**Source**: https://example.com\n\nThis domain is reserved.";
 	assert.equal(dedupeSearchResults(extract), extract);

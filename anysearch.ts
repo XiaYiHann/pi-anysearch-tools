@@ -13,7 +13,7 @@ import { dirname, join } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 
 const ANYSEARCH_MCP_URL = "https://api.anysearch.com/mcp";
-const ANYSEARCH_CLIENT = "pi-anysearch-tools/0.2.1"; // ponytail: static version for X-Anysearch-Client, bump when package.json bumps (telemetry parity with skill/3.0.1)
+const ANYSEARCH_CLIENT = "pi-anysearch-tools/0.3.0"; // ponytail: static version for X-Anysearch-Client, bump when package.json bumps (telemetry parity with skill/3.0.1)
 const SEARCH_TIMEOUT_MS = 30_000;
 const MAX_RESULTS = 10; // server hard cap
 

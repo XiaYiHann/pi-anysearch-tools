@@ -1,10 +1,14 @@
 /**
- * End-to-end tests: real anonymous calls against https://api.anysearch.com/mcp.
+ * End-to-end tests: real anonymous calls against hybrid endpoints.
+ * - POST https://api.anysearch.com/v1/search (search, JSON summaries)
+ * - POST https://api.anysearch.com/mcp        (extract and capability discovery)
  *
- * Each passing scenario stores the raw JSON-RPC response under .evidence/ as
+ * Each passing scenario stores the raw response under .evidence/ as
  * evidence. When the network is unreachable the scenario is marked skipped
  * (with the reason printed) — a silent skip is a failure by construction:
  * t.skip() requires an explicit reason and we log it as well.
+ * Quota, auth, mapping, parsing, or content failures are NOT treated as
+ * network skips and must fail the test.
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -18,12 +22,14 @@ import {
 	searchAnySearch,
 } from "../anysearch.ts";
 
-// E2E tests must run ANONYMOUS: point the agent dir at an empty temp dir so
-// the user's configured key (if any) is never used or sent.
+// Isolate the agent dir so tests never read or write the user's Pi config.
+// Authenticated runs opt in through ANYSEARCH_E2E_API_KEY; otherwise tests run anonymously.
 delete process.env.PI_CODING_AGENT_DIR;
 process.env.PI_CODING_AGENT_DIR = mkdtempSync(join(tmpdir(), "pi-anysearch-e2e-"));
 const savedEnvKey = process.env.ANYSEARCH_API_KEY;
-delete process.env.ANYSEARCH_API_KEY;
+const e2eApiKey = process.env.ANYSEARCH_E2E_API_KEY?.trim();
+if (e2eApiKey) process.env.ANYSEARCH_API_KEY = e2eApiKey;
+else delete process.env.ANYSEARCH_API_KEY;
 
 const EVIDENCE_DIR = join(import.meta.dirname, "..", ".evidence");
 
@@ -60,8 +66,13 @@ test("e2e: general search", async (t) => {
 		if (skipOnNetworkError(t, err)) return;
 		throw err;
 	}
-	assert.equal(result.isError, false, `search failed: ${result.text.slice(0, 300)}`);
-	assert.ok(result.text.includes("Paris"), `expected "Paris" in: ${result.text.slice(0, 300)}`);
+	assert.equal(result.isError, false);
+	assert.ok(result.text.includes("Paris"));
+	assert.ok(result.text.includes("**URL**"));
+	assert.ok(result.text.length <= 12_000);
+	const envelope = result.raw as { code?: unknown; data?: { results?: unknown[] } };
+	assert.equal(envelope.code, 0);
+	assert.ok(Array.isArray(envelope.data?.results));
 	saveEvidence("e2e-general-search", result.raw);
 });
 
@@ -81,8 +92,8 @@ test("e2e: finance vertical search", async (t) => {
 	}
 	assert.equal(result.isError, false, `vertical search failed: ${result.text.slice(0, 300)}`);
 	assert.ok(
-		/NASDAQ|Price|MarketCap/.test(result.text),
-		`expected stock-quote fields (NASDAQ|Price|MarketCap) in: ${result.text.slice(0, 300)}`,
+		/AAPL|Apple|NASDAQ/.test(result.text),
+		`expected stable finance identifier (AAPL|Apple|NASDAQ) in: ${result.text.slice(0, 300)}`,
 	);
 	saveEvidence("e2e-finance-vertical", result.raw);
 });
@@ -91,16 +102,22 @@ test("e2e: batch search", async (t) => {
 	let result;
 	try {
 		result = await batchSearchAnySearch([
-			{ query: "What is the capital of France", max_results: 3 },
-			{ query: "What is the capital of Germany", max_results: 3 },
+			{ query: "What is the capital of France" },
+			{ query: "What is the capital of Germany" },
+			{ query: "What is the capital of Italy" },
 		]);
 	} catch (err) {
 		if (skipOnNetworkError(t, err)) return;
 		throw err;
 	}
 	assert.equal(result.isError, false, `batch search failed: ${result.text.slice(0, 300)}`);
+	assert.ok(result.text.includes("## Query 1:"), `expected "## Query 1:" heading in: ${result.text.slice(0, 500)}`);
+	assert.ok(result.text.includes("## Query 2:"), `expected "## Query 2:" heading in: ${result.text.slice(0, 500)}`);
+	assert.ok(result.text.includes("## Query 3:"), `expected "## Query 3:" heading in: ${result.text.slice(0, 500)}`);
 	assert.ok(result.text.includes("Paris"), `expected "Paris" in: ${result.text.slice(0, 300)}`);
 	assert.ok(result.text.includes("Berlin"), `expected "Berlin" in: ${result.text.slice(0, 300)}`);
+	assert.ok(result.text.includes("Rome"), `expected "Rome" in: ${result.text.slice(0, 300)}`);
+	assert.ok(result.text.length <= 12_000, `batch text exceeds 12k: ${result.text.length}`);
 	saveEvidence("e2e-batch-search", result.raw);
 });
 

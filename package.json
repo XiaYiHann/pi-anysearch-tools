@@ -1,7 +1,7 @@
 {
   "name": "pi-anysearch-tools",
-  "version": "0.3.0",
-  "description": "AnySearch web search toolset for the Pi coding agent: anysearch_search, anysearch (1-5 queries), anysearch_extract, and anysearch_get_sub_domains tools on the official /mcp JSON-RPC API, anonymous fallback, interactive API key setup (/anysearch-setup). Uses https://api.anysearch.com/mcp.",
+  "version": "0.3.1",
+  "description": "AnySearch web search toolset for the Pi coding agent: anysearch_search, anysearch (1-5 queries), anysearch_extract, and anysearch_get_sub_domains on hybrid REST search + MCP extract, bounded summaries, anonymous fallback, interactive API key setup (/anysearch-setup). Uses https://api.anysearch.com/v1/search and https://api.anysearch.com/mcp.",
   "type": "module",
   "keywords": [
     "pi-package",
@@ -19,6 +19,9 @@
     "type": "git",
     "url": "git+https://github.com/XiaYiHann/pi-anysearch-tools.git"
   },
+  "publishConfig": {
+    "registry": "https://registry.npmjs.org/"
+  },
   "files": [
     "*.ts",
     "scripts/",
@@ -28,7 +31,8 @@
   ],
   "scripts": {
     "postinstall": "node scripts/postinstall.mjs",
-    "test": "node --experimental-strip-types --test test/*.test.ts"
+    "test": "node --experimental-strip-types --test test/anysearch.test.ts",
+    "test:e2e": "node --experimental-strip-types --test test/e2e.test.ts"
   },
   "peerDependencies": {
     "@earendil-works/pi-ai": "*",

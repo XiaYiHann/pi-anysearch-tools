@@ -3,24 +3,25 @@
 [![npm](https://img.shields.io/npm/v/pi-anysearch-tools)](https://www.npmjs.com/package/pi-anysearch-tools)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](#license)
 
-`pi-anysearch-tools` is a [Pi Coding Agent](https://pi.dev/) extension that adds four AnySearch search tools, backed by the official AnySearch v3 endpoint:
+`pi-anysearch-tools` is a [Pi Coding Agent](https://pi.dev/) extension that adds four AnySearch search tools, backed by the official AnySearch v3 endpoints:
 
 ```text
-POST https://api.anysearch.com/mcp   (JSON-RPC 2.0, method "tools/call")
+POST https://api.anysearch.com/v1/search  (search, JSON summaries)
+POST https://api.anysearch.com/mcp        (extract and capability discovery)
 ```
 
 Use it for current documentation, news, prices, products, people, comparisons, fact-checking, vertical-domain data (stocks, papers, legal cases, flights, drugs, code docs, weather, …), and full-page URL extraction—information that may not be available in the model's training data. These are web-search tools, not replacements for Pi's local file or shell tools.
 
-> 中文说明：这是一个面向 Pi Coding Agent 的 AnySearch 联网搜索扩展（官方 v3 /mcp 接口）。无需 API key 也可匿名使用，但匿名请求受速率和配额限制。
+> 中文说明：这是一个面向 Pi Coding Agent 的 AnySearch 联网搜索扩展（官方 v3 混合接口：搜索走 /v1/search JSON，抽取/能力发现走 /mcp）。无需 API key 也可匿名使用，但匿名请求受速率和配额限制。
 
 ## Core capabilities
 
-- General web search as Markdown (ranked results with titles, URLs, and content).
+- General web search as bounded Markdown (title, URL, and short snippet only — 500 chars per result, 12,000 chars total final cap including notices; use `anysearch_extract` for full page content).
 - Vertical domain search via `domain` / `sub_domain` / `sub_domain_params` (17 domains).
-- Parallel batch search: 1–5 queries in one call; a single failure does not block the rest.
-- Full-page URL extraction as clean Markdown (server-truncated at 50,000 characters).
+- Parallel batch search: 1–5 queries in one call (1–5 accepted, 2–3 recommended); omitted `max_results` defaults to 3 per query; up to 5×10 supported but heavy — 12k cap keeps context bounded; a single failure does not block the rest.
+- Full-page URL extraction as clean Markdown (server-truncated at 50,000 characters) — escalation path when snippets are insufficient.
 - Vertical domain directory discovery (`anysearch_get_sub_domains`), cached per session.
-- Region (`zone`) and language passthrough; `max_results` clamped to the server cap of 1–10.
+- Region (`zone`) and language passthrough; `max_results` clamped to the server cap of 1–10 (single default 5, batch default 3 per query).
 - Anonymous access without initial configuration.
 - Optional API-key authentication from an environment variable or Pi agent configuration.
 - If the API auto-registers a new key on quota exhaustion, the extension asks once via the TUI and saves it after confirmation.
@@ -112,7 +113,7 @@ You can always configure the extension later with `/anysearch-setup` or `ANYSEAR
 | `domain` | enum (17 values) | No | Vertical domain for routing: `general`, `resource`, `social_media`, `finance`, `academic`, `legal`, `health`, `business`, `security`, `ip`, `code`, `energy`, `environment`, `agriculture`, `travel`, `film`, `gaming`. Must come from `anysearch_get_sub_domains`. |
 | `sub_domain` | string | No | Sub-domain routing key (e.g. `finance.quote`). Required when `domain` is set; must come from `anysearch_get_sub_domains`. |
 | `sub_domain_params` | object | No | Structured params from `anysearch_get_sub_domains` (string values). Params marked *required* must always be included—pass an empty string for inapplicable ones; never omit them. |
-| `max_results` | integer | No | Number of results, from 1 to 10 (server hard cap). Default: 10. |
+| `max_results` | integer | No | Number of results, from 1 to 10 (server hard cap). Default: 5. Snippets capped at 500 chars, total 12,000 chars final cap including notices; use `anysearch_extract` for full page. Explicit 5×10 still accepted but heavy — prefer 3 for batch. |
 | `zone` | `cn` \| `intl` | No | Search region. |
 | `language` | string | No | Preferred language, such as `zh-CN` or `en`. |
 
@@ -138,9 +139,9 @@ Vertical search — after `anysearch_get_sub_domains({ "domains": ["finance"] })
 
 | Parameter | Type | Required | Description |
 | --- | --- | --- | --- |
-| `queries` | array (1–5 items) | Yes | Each item follows the `anysearch_search` schema (`query` required). One item works as a single search. |
+| `queries` | array (1–5 items) | Yes | Each item follows the `anysearch_search` schema (`query` required; omitted `max_results` defaults to 3 per query). One item works as a single search. 1–5 accepted, 2–3 recommended. |
 
-Runs up to 5 independent queries in one call; best for multi-angle research and hybrid general + vertical sweeps. A single failed query does not block the others. Results are grouped per query.
+Runs up to 5 independent queries in one call (1–5 accepted, 2–3 recommended); best for multi-angle research and hybrid general + vertical sweeps. Each query returns title, URL, and short snippet only (500 chars per result, 12,000 chars total final cap including notices; use `anysearch_extract` for full page). Up to 5×10 supported but heavy — prefer 3 per query. A single failed query does not block the others. Results are grouped per query.
 
 ```json
 {
@@ -164,7 +165,7 @@ Use when search snippets are too short to answer, when the user provides a URL, 
 | Parameter | Type | Required | Description |
 | --- | --- | --- | --- |
 | `domain` | enum (17 values) | No* | Single domain to query. |
-| `domains` | array of enum (1–5) | No* | Batch of up to 5 domains; takes priority over `domain`. |
+| `domains` | array of enum (1–5) | No* | Batch of up to 5 domains; takes priority over `domain`. Prefer one domain per call to keep context small. |
 
 \* at least one of `domain` / `domains` is required.
 
@@ -172,9 +173,11 @@ Returns the vertical domain directory (sub-domains with descriptions and paramet
 
 ## Returned results
 
-Search results are deduplicated per query before being returned — high-duplication items are filtered out and never reach the agent's context. An item is dropped when its normalized URL (scheme, `www`, tracking params, trailing slash, case-insensitive) matches an earlier item in the same query, OR its normalized title (case/punctuation-insensitive, leading arXiv id stripped, >= 12 chars) is >= 0.85 similar to an earlier title (char-bigram overlap; empirical split: real duplicates >= 0.93, distinct papers <= 0.72). Kept items are renumbered, and the `## Search Results` count is rewritten. `anysearch_extract` and `anysearch_get_sub_domains` text passes through untouched.
+Search uses `POST https://api.anysearch.com/v1/search` (JSON summaries) and returns only bounded Markdown: title, URL, and short snippet only (500 chars per result, whitespace-normalized). The REST `content` field is discarded before the Pi tool result is built: it is absent from both model-facing `content` and persisted `details`. Single-search default is 5 results; batch per-query default is 3 (explicit 1–10 still accepted; up to 5×10 supported but heavy). Batch output is fairly allocated per query and capped at 12,000 characters total. The final Pi tool content — including anonymous and auto-registration notices — is also capped at 12,000 characters (`boundSearchToolText` truncates with `…`); `details.text` is kept consistent with the content sent to the model. Use `anysearch_extract` (`POST https://api.anysearch.com/mcp`) for full page content when snippets are insufficient.
 
-Each tool returns the AnySearch response text (Markdown) for the agent, plus structured details containing the response `request_id` (when present) and the auth mode (`anonymous` or `configured`). Details never contain the API key. API and network failures are thrown so Pi can mark the tool result as an error; error messages include the `request_id` when the server provides one.
+Search results are deduplicated before being returned — high-duplication items are filtered out and never reach the agent's context (structured dedupe; batch dedupes globally across queries). An item is dropped when its normalized URL (scheme, `www`, tracking params, trailing slash, case-insensitive) matches an earlier item, OR its normalized title (case/punctuation-insensitive, leading arXiv id stripped, >= 12 chars) is >= 0.85 similar to an earlier title (char-bigram overlap; empirical split: real duplicates >= 0.93, distinct papers <= 0.72). Kept items are renumbered, and the `## Search Results` count is rewritten. `anysearch_extract` and `anysearch_get_sub_domains` text passes through untouched (via `POST https://api.anysearch.com/mcp`).
+
+Each tool returns the AnySearch response text (Markdown) for the agent, plus structured details containing the response `request_id` (when present) and the auth mode (`anonymous` or `configured`). Details never contain the API key. `details.text` equals the final bounded content sent to the model (12,000-char cap including notices). API and network failures are thrown so Pi can mark the tool result as an error; error messages include the `request_id` when the server provides one.
 
 In the TUI, search responses render as the classic numbered list (top 5 when collapsed, full list with snippets when expanded). Other tools (extract, domain directory) render the response text directly, truncated when collapsed.
 
@@ -190,20 +193,21 @@ Use the AnySearch tools when you want a direct AnySearch entry point (especially
 - Prefer `ANYSEARCH_API_KEY` for CI and managed environments.
 - The configuration file stores the key locally as plain JSON; protect access to your Pi agent directory.
 - Pi extensions execute with the user's permissions. Review the source before installation.
-- This extension performs network requests to `https://api.anysearch.com/mcp` when one of the tools is called. It does not make a network request merely by loading the extension.
+- This extension performs network requests to `https://api.anysearch.com/v1/search` (search) and `https://api.anysearch.com/mcp` (extract and capability discovery) when one of the tools is called. It does not make a network request merely by loading the extension.
 
 ## Development and verification
 
 ```bash
 npm install --ignore-scripts
 npm test
+ANYSEARCH_E2E_API_KEY=as_sk_... npm run test:e2e  # optional real endpoints
 npm pack --dry-run
 ```
 
-`npm test` runs two suites with Node's built-in test runner (`node --experimental-strip-types --test test/*.test.ts`):
+`npm test` runs the deterministic mocked-fetch suite; real network checks are explicit so quota, registration, and connectivity cannot make the default test command flaky:
 
-- `test/anysearch.test.ts` — unit/integration tests with a mocked `fetch`: JSON-RPC request assembly (method, tool name, argument passthrough including `zone`, `language`, and `sub_domain_params`), `max_results` clamping, `isError`/`request_id` error paths, `auto_registered` key parsing, the `get_sub_domains` session cache, and result dedupe (URL/title normalization, per-section scoping, renumbering and count rewrite).
-- `test/e2e.test.ts` — end-to-end tests against the real `/mcp` endpoint (anonymous: the agent dir and env key are isolated so no configured key is ever used). Five scenarios: general search, finance vertical search, batch search, `example.com` extraction, and `get_sub_domains` for finance. Each passing scenario stores the raw JSON-RPC response under `.evidence/`; if the network is unreachable the scenarios are skipped with an explicit reason.
+- `test/anysearch.test.ts` — unit/integration tests with a mocked `fetch`: REST `POST https://api.anysearch.com/v1/search` request assembly (`format:"json"`, `tag`/`params` mapping, `zone`/`language` passthrough), `max_results` clamping (single default 5, batch default 3 per query), 500-char snippet cap, 12,000-char final cap including notices (`boundSearchToolText`), `isError`/`request_id` error paths, `auto_registered` key parsing, the `get_sub_domains` session cache, and result dedupe (URL/title normalization, per-section scoping, renumbering and count rewrite, global cross-query dedupe, fair per-query allocation).
+- `test/e2e.test.ts` — explicit end-to-end tests against the real hybrid endpoints (`POST https://api.anysearch.com/v1/search` for search/batch, `POST https://api.anysearch.com/mcp` for extract/domain). It uses `ANYSEARCH_E2E_API_KEY` when provided and otherwise runs anonymously, while isolating the Pi agent directory so tests never read or write user configuration. Five scenarios cover general search, finance vertical search, batch search, `example.com` extraction, and `get_sub_domains` for finance. Each passing scenario stores the raw response under `.evidence/`; unreachable networks are skipped with an explicit reason.
 
 For a temporary local Pi run:
 

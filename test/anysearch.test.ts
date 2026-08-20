@@ -9,7 +9,6 @@ import {
 	buildSearchArguments,
 	callMcpTool,
 	clearSubDomainCache,
-	dedupeSearchResults,
 	extractAnySearch,
 	extractAutoRegisteredKey,
 	getSubDomainsAnySearch,
@@ -97,6 +96,21 @@ function okResult(text: string, extra: Record<string, unknown> = {}, meta: Recor
 	};
 }
 
+function okSearchResult(
+	results: Array<Record<string, unknown>>,
+	extra: Record<string, unknown> = {},
+) {
+	return {
+		body: {
+			code: 0,
+			message: "success",
+			request_id: "rest-r-1",
+			data: { results, metadata: { total_results: results.length, search_time_ms: 12 } },
+			...extra,
+		},
+	};
+}
+
 test("callMcpTool POSTs a JSON-RPC tools/call request to the /mcp endpoint", async () => {
 	const m = mockFetch(() => okResult("ok"));
 	try {
@@ -118,8 +132,37 @@ test("callMcpTool POSTs a JSON-RPC tools/call request to the /mcp endpoint", asy
 	}
 });
 
-test("searchAnySearch passes zone, language, domain, sub_domain and sub_domain_params through", async () => {
-	const m = mockFetch(() => okResult("ok"));
+test("searchAnySearch uses REST JSON and excludes full content", async () => {
+	const m = mockFetch(() =>
+		okSearchResult([
+			{
+				title: "Pi SDK",
+				url: "https://pi.dev/docs/latest/sdk",
+				snippet: "Short official summary.",
+				content: "SECRET_FULL_PAGE_BODY_SHOULD_NEVER_REACH_CONTEXT",
+			},
+		]),
+	);
+	try {
+		const result = await searchAnySearch({ query: "Pi SDK" });
+		assert.equal(m.captures[0].url, "https://api.anysearch.com/v1/search");
+		assert.deepEqual(m.captures[0].body, {
+			query: "Pi SDK",
+			max_results: 5,
+			format: "json",
+		});
+		assert.match(result.text, /Pi SDK/);
+		assert.match(result.text, /https:\/\/pi\.dev\/docs\/latest\/sdk/);
+		assert.match(result.text, /Short official summary/);
+		assert.doesNotMatch(result.text, /SECRET_FULL_PAGE_BODY/);
+		assert.equal(result.requestId, "rest-r-1");
+	} finally {
+		m.restore();
+	}
+});
+
+test("searchAnySearch maps vertical args to REST tag/params and omits domain", async () => {
+	const m = mockFetch(() => okSearchResult([{ title: "t", url: "https://example.com", snippet: "s" }]));
 	try {
 		await searchAnySearch({
 			query: "AAPL",
@@ -130,47 +173,64 @@ test("searchAnySearch passes zone, language, domain, sub_domain and sub_domain_p
 			language: "zh-CN",
 			max_results: 5,
 		});
-		const body = m.captures[0].body as Record<string, unknown>;
-		assert.deepEqual(body.params, {
-			name: "search",
-			arguments: {
-				query: "AAPL",
-				max_results: 5,
-				domain: "finance",
-				sub_domain: "finance.quote",
-				sub_domain_params: { type: "stock", symbol: "AAPL", cn_code: "" },
-				zone: "cn",
-				language: "zh-CN",
-			},
+		assert.deepEqual(m.captures[0].body, {
+			query: "AAPL",
+			max_results: 5,
+			tag: "finance.quote",
+			params: { type: "stock", symbol: "AAPL", cn_code: "" },
+			zone: "cn",
+			language: "zh-CN",
+			format: "json",
 		});
+		assert.equal("domain" in (m.captures[0].body as Record<string, unknown>), false);
 	} finally {
 		m.restore();
 	}
 });
 
-test("max_results clamps to 1-10 with default 10", () => {
+test("searchAnySearch throws bounded REST 429 with request id and retry hint", async () => {
+	const m = mockFetch(() => ({
+		status: 429,
+		headers: { "retry-after": "7" },
+		body: { code: -1, message: "rate limit", request_id: "rest-429" },
+	}));
+	try {
+		await assert.rejects(
+			() => searchAnySearch({ query: "q" }),
+			(err: Error) => {
+				assert.match(err.message, /429/);
+				assert.match(err.message, /rest-429/);
+				assert.match(err.message, /Retry-After: 7/);
+				return true;
+			},
+		);
+		assert.equal(m.captures[0].url, "https://api.anysearch.com/v1/search");
+	} finally {
+		m.restore();
+	}
+});
+
+test("max_results clamps to 1-10 with default 5", () => {
 	assert.equal(normalizeMaxResults(99), 10);
 	assert.equal(normalizeMaxResults(50), 10);
 	assert.equal(normalizeMaxResults(0), 1);
 	assert.equal(normalizeMaxResults(-3), 1);
 	assert.equal(normalizeMaxResults(3.7), 3);
 	assert.equal(normalizeMaxResults(10), 10);
-	assert.equal(normalizeMaxResults(undefined), 10);
-	assert.equal(normalizeMaxResults(Number.NaN), 10);
+	assert.equal(normalizeMaxResults(undefined), 5);
+	assert.equal(normalizeMaxResults(Number.NaN), 5);
 });
 
 test("searchAnySearch clamps max_results in the request body", async () => {
-	const m = mockFetch(() => okResult("ok"));
+	const m = mockFetch(() => okSearchResult([{ title: "t", url: "https://example.com", snippet: "s" }]));
 	try {
 		await searchAnySearch({ query: "q", max_results: 99 });
-		const args1 = ((m.captures[0].body as Record<string, unknown>).params as { arguments: Record<string, unknown> })
-			.arguments;
+		const args1 = m.captures[0].body as Record<string, unknown>;
 		assert.equal(args1.max_results, 10);
 
 		await searchAnySearch({ query: "q" });
-		const args2 = ((m.captures[1].body as Record<string, unknown>).params as { arguments: Record<string, unknown> })
-			.arguments;
-		assert.equal(args2.max_results, 10);
+		const args2 = m.captures[1].body as Record<string, unknown>;
+		assert.equal(args2.max_results, 5);
 	} finally {
 		m.restore();
 	}
@@ -181,7 +241,7 @@ test("buildSearchArguments maps params without dropping empty-string sub_domain_
 		query: "q",
 		sub_domain_params: { a: "1", b: "" },
 	});
-	assert.deepEqual(args, { query: "q", max_results: 10, sub_domain_params: { a: "1", b: "" } });
+	assert.deepEqual(args, { query: "q", max_results: 5, format: "json", params: { a: "1", b: "" } });
 });
 
 test("success response returns first text item, isError false and request_id", async () => {
@@ -295,31 +355,28 @@ test("extract sends the url argument to the extract tool", async () => {
 	}
 });
 
-test("batch_search sends the queries array with per-item max_results clamped", async () => {
-	const m = mockFetch(() => okResult("merged"));
+test("batch search runs REST requests with default 3 and preserves query order", async () => {
+	const m = mockFetch((capture) => {
+		const query = (capture.body as { query: string }).query;
+		return okSearchResult([{ title: `${query} title`, url: `https://example.com/${query}`, snippet: `${query} summary` }]);
+	});
 	try {
-		await batchSearchAnySearch([
-			{ query: "a", max_results: 99 },
-			{ query: "b" },
-		]);
-		const body = m.captures[0].body as Record<string, unknown>;
-		const params = body.params as { name: string; arguments: { queries: Array<Record<string, unknown>> } };
-		assert.equal(params.name, "batch_search");
-		assert.equal(params.arguments.queries.length, 2);
-		assert.equal(params.arguments.queries[0].max_results, 10);
-		assert.equal(params.arguments.queries[1].max_results, 10);
+		const result = await batchSearchAnySearch([{ query: "first" }, { query: "second" }, { query: "third" }]);
+		assert.equal(m.captures.length, 3);
+		assert.deepEqual(m.captures.map((c) => (c.body as { max_results: number }).max_results), [3, 3, 3]);
+		assert.ok(result.text.indexOf("## Query 1: first") < result.text.indexOf("## Query 2: second"));
+		assert.ok(result.text.indexOf("## Query 2: second") < result.text.indexOf("## Query 3: third"));
 	} finally {
 		m.restore();
 	}
 });
 
 test("batch_search accepts 1-5 queries and rejects empty or more than 5", async () => {
-	const m = mockFetch(() => okResult("merged"));
+	const m = mockFetch(() => okSearchResult([{ title: "t", url: "https://example.com", snippet: "s" }]));
 	try {
 		await batchSearchAnySearch([{ query: "only" }]);
-		const body = m.captures[0].body as Record<string, unknown>;
-		const params = body.params as { arguments: { queries: unknown[] } };
-		assert.equal(params.arguments.queries.length, 1);
+		assert.equal(m.captures.length, 1);
+		assert.equal((m.captures[0].body as Record<string, unknown>).query, "only");
 	} finally {
 		m.restore();
 	}
@@ -336,6 +393,145 @@ test("batch_search accepts 1-5 queries and rejects empty or more than 5", async 
 			]),
 		/1-5/,
 	);
+});
+
+test("batch search partial failure keeps successful groups and marks isError false", async () => {
+	const m = mockFetch((capture) => {
+		const query = (capture.body as { query: string }).query;
+		if (query === "second") return { status: 500, body: { code: -1, message: "internal boom", request_id: "r-500" } };
+		return okSearchResult([{ title: `${query} title`, url: `https://example.com/${query}`, snippet: `${query} summary` }]);
+	});
+	try {
+		const result = await batchSearchAnySearch([{ query: "first" }, { query: "second" }, { query: "third" }]);
+		assert.ok(result.text.includes("## Query 1: first"));
+		assert.ok(result.text.includes("## Query 3: third"));
+		assert.ok(result.text.includes("first title"));
+		assert.ok(result.text.includes("third title"));
+		assert.ok(result.text.includes("Search failed:"), "Query 2 error should be rendered");
+		assert.ok(result.text.includes("## Query 2: second"));
+		assert.equal(result.isError, false);
+		assert.ok(result.text.length < 12000);
+	} finally {
+		m.restore();
+	}
+});
+
+test("batch search dedupes globally across queries", async () => {
+	const duplicateA = { title: "Same Paper", url: "https://example.com/paper?utm_source=a", snippet: "A" };
+	const duplicateB = { title: "Same Paper", url: "https://example.com/paper", snippet: "B" };
+	const uniqueB = { title: "Different Paper", url: "https://example.com/different", snippet: "C" };
+	const m = mockFetch((capture) => {
+		const q = (capture.body as { query: string }).query;
+		if (q === "first") return okSearchResult([duplicateA]);
+		if (q === "second") return okSearchResult([duplicateB, uniqueB]);
+		return okSearchResult([]);
+	});
+	try {
+		const result = await batchSearchAnySearch([{ query: "first" }, { query: "second" }]);
+		const paperUrlCount = (result.text.match(/example\.com\/paper/g) || []).length;
+		assert.equal(paperUrlCount, 1, "duplicate URL should appear once globally");
+		assert.ok(result.text.includes("Different Paper"), "uniqueB should be present via second query");
+		assert.ok(result.text.includes("Same Paper"), "duplicateA should be present");
+		// Ensure we use next unique result for second query (should not contain duplicateB's snippet B as separate result if deduped)
+		// Count occurrences of "Same Paper" title — should be once
+		const samePaperCount = (result.text.match(/Same Paper/g) || []).length;
+		assert.equal(samePaperCount, 1, "Same Paper title should appear once globally");
+	} finally {
+		m.restore();
+	}
+});
+
+test("batch search fair allocation keeps all headings within 12k", async () => {
+	const snippet500 = "x".repeat(500);
+	const makeResults = (prefix: string) =>
+		Array.from({ length: 10 }, (_, i) => ({
+			title: `${prefix}-${i}`,
+			url: `https://example.com/${prefix}/${i}`,
+			snippet: snippet500,
+		}));
+	const m = mockFetch((capture) => {
+		const q = (capture.body as { query: string }).query;
+		return okSearchResult(makeResults(q));
+	});
+	try {
+		const result = await batchSearchAnySearch([{ query: "first" }, { query: "second" }, { query: "third" }]);
+		assert.ok(result.text.length <= 12_000, `text length ${result.text.length} exceeds 12_000`);
+		assert.ok(result.text.includes("## Query 1: first"));
+		assert.ok(result.text.includes("## Query 2: second"));
+		assert.ok(result.text.includes("## Query 3: third"));
+		assert.equal(result.isError, false);
+		// Fair allocation: each query should retain at least a few results (not just first query filling budget)
+		const q1Idx = result.text.indexOf("## Query 1: first");
+		const q2Idx = result.text.indexOf("## Query 2: second");
+		const q3Idx = result.text.indexOf("## Query 3: third");
+		const q1Section = result.text.slice(q1Idx, q2Idx);
+		const q2Section = result.text.slice(q2Idx, q3Idx);
+		const q3Section = result.text.slice(q3Idx);
+		const count1 = (q1Section.match(/### \d+\./g) || []).length;
+		const count2 = (q2Section.match(/### \d+\./g) || []).length;
+		const count3 = (q3Section.match(/### \d+\./g) || []).length;
+		assert.ok(count1 >= 3 && count2 >= 3 && count3 >= 3, `fair allocation: counts ${count1},${count2},${count3} each >=3`);
+		assert.ok(count1 <= 10 && count2 <= 10 && count3 <= 10);
+	} finally {
+		m.restore();
+	}
+});
+
+test("batch search abort via DOMException AbortError propagates as cancellation", async () => {
+	const m = mockFetch(() => {
+		throw new DOMException("timeout", "AbortError");
+	});
+	try {
+		await assert.rejects(() => batchSearchAnySearch([{ query: "first" }, { query: "second" }]), /cancelled or timed out/);
+	} finally {
+		m.restore();
+	}
+});
+
+test("batch search explicit max_results 99 clamps to 10 while default stays 3", async () => {
+	const m = mockFetch(() => okSearchResult([{ title: "t", url: "https://example.com", snippet: "s" }]));
+	try {
+		await batchSearchAnySearch([{ query: "a", max_results: 99 }, { query: "b", max_results: 1 }, { query: "c" }]);
+		assert.deepEqual(
+			m.captures.map((c) => (c.body as { max_results: number }).max_results),
+			[10, 1, 3],
+		);
+	} finally {
+		m.restore();
+	}
+});
+
+test("batch search in-band error stores bounded {error} in raw", async () => {
+	const m = mockFetch((capture) => {
+		const q = (capture.body as { query: string }).query;
+		if (q === "second") {
+			return {
+				body: {
+					code: -1,
+					message: "quota exhausted for test",
+					request_id: "r-err",
+					auto_registered: { api_key: { key: "as_sk_test12345678" } },
+					data: null,
+				},
+			};
+		}
+		return okSearchResult([{ title: `${q} title`, url: `https://example.com/${q}`, snippet: "ok" }]);
+	});
+	try {
+		const result = await batchSearchAnySearch([{ query: "first" }, { query: "second" }, { query: "third" }]);
+		assert.ok(result.text.includes("## Query 1: first"));
+		assert.ok(result.text.includes("## Query 2: second"));
+		assert.ok(result.text.includes("Search failed:"));
+		assert.equal(result.isError, false, "one success means isError false");
+		const raws = result.raw as unknown[];
+		assert.equal(raws.length, 3);
+		// successful raws are envelopes with code 0
+		assert.ok(raws[0] && typeof raws[0] === "object" && (raws[0] as any).code === 0);
+		assert.deepEqual(raws[1], { error: "quota exhausted for test" });
+		assert.ok(raws[2] && typeof raws[2] === "object" && (raws[2] as any).code === 0);
+	} finally {
+		m.restore();
+	}
 });
 
 test("get_sub_domains prefers the domains array over domain and sends it as an argument", async () => {
@@ -503,109 +699,6 @@ test("normalizeSearchUrl/normalizeSearchTitle normalize for dedupe", () => {
 	assert.equal(normalizeSearchTitle("  Hello   World ... "), "hello world");
 });
 
-test("dedupeSearchResults collapses duplicate URL/title results and renumbers", () => {
-	const md = [
-		"## Search Results (4 results, 1409ms)",
-		"",
-		"### 1. Who Gets the Reward & Who Gets the Blame? Evaluation-Aligned Training ...",
-		"- **URL**: https://openreview.net/forum?id=abc123&utm_source=twitter",
-		"- snippet one",
-		"",
-		"### 2. Who Gets the Reward & Who Gets the Blame? Evaluation-Aligned Training ...",
-		"- **URL**: http://www.openreview.net/forum?id=abc123/",
-		"- snippet two",
-		"",
-		"### 3. Who Gets the Reward & Who Gets the Blame? Evaluation-Aligned Training ...",
-		"- **URL**: https://arxiv.org/abs/2511.10687",
-		"- snippet three",
-		"",
-		"### 4. Distinct result",
-		"- **URL**: https://example.com/other",
-		"- snippet four",
-	].join("\n");
-	const out = dedupeSearchResults(md);
-	// Item 2: URL duplicate (scheme/www/tracking/trailing slash). Item 3: title duplicate.
-	assert.ok(out.includes("### 1. Who Gets the Reward"), "first occurrence kept");
-	assert.ok(out.includes("### 2. Distinct result"), "distinct item renumbered");
-	assert.ok(!out.includes("snippet two"), "URL duplicate dropped");
-	assert.ok(!out.includes("snippet three"), "title duplicate dropped");
-	assert.ok(out.includes("## Search Results (2 results, 1409ms)"), "count rewritten");
-	assert.ok(!out.includes("### 3."), "no stale numbering");
-});
-
-test("dedupeSearchResults scopes per section and keeps short generic titles", () => {
-	const md = [
-		"## Query 1: paris",
-		"",
-		"## Search Results (2 results, 100ms)",
-		"",
-		"### 1. Paris",
-		"- **URL**: https://a.example",
-		"- one",
-		"",
-		"### 2. Paris",
-		"- **URL**: https://b.example",
-		"- two",
-		"",
-		"## Query 2: deep research survey",
-		"",
-		"## Search Results (2 results, 100ms)",
-		"",
-		"### 1. Deep Research Survey Paper",
-		"- **URL**: https://arxiv.org/abs/1",
-		"- three",
-		"",
-		"### 2. Deep Research Survey Paper",
-		"- **URL**: https://openreview.net/abs/2",
-		"- four",
-	].join("\n");
-	const out = dedupeSearchResults(md);
-	assert.ok(out.includes("### 1. Paris") && out.includes("### 2. Paris"), "short titles with distinct URLs stay");
-	assert.ok(!out.includes("- four"), "long-title duplicate collapsed in second section");
-	assert.ok(out.includes("(1 results, 100ms)"), "second section count rewritten");
-});
-
-test("dedupeSearchResults collapses truncation-prefix titles (same doc, truncated differently)", () => {
-	const md = [
-		"## Search Results (2 results, 100ms)",
-		"",
-		"### 1. Shapley-Coop: Credit Assignment for Emergent ...",
-		"- **URL**: https://openreview.net/pdf?id=HnJ1UkuJXS",
-		"- one",
-		"",
-		"### 2. Shapley-Coop: Credit Assignment for Emergent Cooperation in ...",
-		"- **URL**: https://openreview.net/pdf/b766f8bc0602b07837d552dd7f04168535c02370.pdf",
-		"- two",
-	].join("\n");
-	const out = dedupeSearchResults(md);
-	assert.ok(out.includes("### 1. Shapley-Coop"), "first kept");
-	assert.ok(!out.includes("- two"), "truncation-prefix title duplicate dropped");
-	assert.ok(out.includes("(1 results, 100ms)"), "count rewritten");
-});
-
-test("dedupeSearchResults collapses aggregator site suffixes (same doc on several sites)", () => {
-	const md = [
-		"## Search Results (3 results, 100ms)",
-		"",
-		"### 1. Who Gets the Reward & Who Gets the Blame? Evaluation-Aligned Training Signals for Multi-LLM Agents - arXiv.gg",
-		"- **URL**: https://arxiv.gg/abs/2511.10687",
-		"- one",
-		"",
-		"### 2. Who Gets the Reward & Who Gets the Blame? Evaluation-Aligned Training Signals for Multi-LLM Agents | OpenReview",
-		"- **URL**: https://openreview.net/forum?id=habbb09al0",
-		"- two",
-		"",
-		"### 3. A Distinct Unrelated Result with a Different Topic",
-		"- **URL**: https://example.com/other",
-		"- three",
-	].join("\n");
-	const out = dedupeSearchResults(md);
-	assert.ok(out.includes("### 1. Who Gets the Reward"), "first kept");
-	assert.ok(!out.includes("- two"), "site-suffix duplicate dropped");
-	assert.ok(out.includes("### 2. A Distinct Unrelated Result"), "distinct item renumbered");
-	assert.ok(out.includes("(2 results, 100ms)"), "count rewritten");
-});
-
 test("normalizeSearchTitle is case/punctuation-insensitive and strips leading arXiv ids", () => {
 	assert.equal(normalizeSearchTitle("  Hello   World ... "), "hello world");
 	assert.equal(normalizeSearchTitle("Foo Bar | alphaXiv"), "foo bar alphaxiv");
@@ -662,33 +755,35 @@ test("titleSimilarity separates high-duplication titles from distinct papers", (
 	);
 });
 
-test("dedupeSearchResults leaves non-search text unchanged", () => {
-	const extract = "## Example Domain\n\n**Source**: https://example.com\n\nThis domain is reserved.";
-	assert.equal(dedupeSearchResults(extract), extract);
-	const directory = "## finance Domain Capabilities (2 available)\n\n### finance.quote\ndesc\n\n### finance.calendar\ndesc";
-	assert.equal(dedupeSearchResults(directory), directory);
-});
-
-test("searchAnySearch dedupes server results in the returned text", async () => {
-	const m = mockFetch(() =>
-		okResult(
-			[
-				"## Search Results (2 results, 50ms)",
-				"### 1. Paris - Wikipedia",
-				"- **URL**: https://en.wikipedia.org/wiki/Paris",
-				"### 2. Paris - Wikipedia",
-				"- **URL**: https://en.wikipedia.org/wiki/Paris?utm_source=web",
-			].join("\n"),
-		),
-	);
+test("searchAnySearch dedupes duplicate URL/title results within a single call", async () => {
+	const duplicateA = { title: "Same Paper", url: "https://example.com/paper?utm_source=a", snippet: "A" };
+	const duplicateB = { title: "Same Paper", url: "https://example.com/paper", snippet: "B" };
+	const unique = { title: "Different Paper", url: "https://example.com/different", snippet: "C" };
+	const m = mockFetch(() => okSearchResult([duplicateA, duplicateB, unique]));
 	try {
-		const result = await searchAnySearch({ query: "Paris" });
-		assert.ok(result.text.includes("(1 results"), `count not rewritten: ${result.text}`);
-		assert.ok(!result.text.includes("utm_source"), "duplicate item still present");
+		const result = await searchAnySearch({ query: "test dedupe" });
+		const paperUrlCount = (result.text.match(/example\.com\/paper/g) || []).length;
+		assert.equal(paperUrlCount, 1, "duplicate URL should appear once in single search");
+		assert.ok(result.text.includes("Different Paper"), "unique result should remain");
+		const sameCount = (result.text.match(/Same Paper/g) || []).length;
+		assert.equal(sameCount, 1, "Same Paper title should appear once after single dedupe");
 	} finally {
 		m.restore();
 	}
 });
+
+test("batch search TimeoutError propagates as cancellation without relying on message text", async () => {
+	const m = mockFetch(() => {
+		throw new DOMException("deadline exceeded", "TimeoutError");
+	});
+	try {
+		await assert.rejects(() => batchSearchAnySearch([{ query: "first" }, { query: "second" }]), /cancelled or timed out/);
+	} finally {
+		m.restore();
+	}
+});
+
+// searchAnySearch dedupes via structured items (Task 2); REST single search preserves server order for Task 1.
 
 // Restore the user's env after the suite.
 test("restore env", () => {

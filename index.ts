@@ -1,12 +1,12 @@
 /**
  * pi-anysearch — AnySearch web search for the Pi coding agent.
  *
- * Registers 4 tools backed by the AnySearch v3 MCP endpoint
- * (https://api.anysearch.com/mcp, JSON-RPC 2.0): anysearch_search (general +
- * vertical domain search), anysearch_batch_search (2-5 parallel queries),
- * anysearch_extract (URL → full-page Markdown) and anysearch_get_sub_domains
- * (vertical domain directory). Anonymous access works out of the box; set
- * ANYSEARCH_API_KEY or add `anysearchApiKey` to <agent dir>/anysearch.json
+ * Registers 4 tools: search via REST POST https://api.anysearch.com/v1/search
+ * (JSON summaries, title/URL/snippet) and extract/capability discovery via
+ * MCP POST https://api.anysearch.com/mcp (anysearch_extract, anysearch_get_sub_domains).
+ * Search returns bounded Markdown (500-char snippets, 12,000-char total cap;
+ * use anysearch_extract for full page). Anonymous access works out of the box;
+ * set ANYSEARCH_API_KEY or add `anysearchApiKey` to <agent dir>/anysearch.json
  * for higher limits and paid quota.
  */
 
@@ -25,11 +25,11 @@ import {
 	hasApiKey,
 	hasBeenPrompted,
 	markPrompted,
+	MAX_SEARCH_OUTPUT_CHARS,
 	searchAnySearch,
 	writeApiKey,
 } from "./anysearch.ts";
 
-const API_ENDPOINT = "https://api.anysearch.com/mcp";
 const SETUP_COMMAND_NAME = "anysearch-setup";
 const STATUS_COMMAND_NAME = "anysearch-status";
 const SETUP_COMMAND = `/${SETUP_COMMAND_NAME}`;
@@ -73,15 +73,15 @@ const SEARCH_ITEM_PARAMETERS = {
 		}),
 	),
 	max_results: Type.Optional(
-		Type.Integer({ minimum: 1, maximum: 10, description: "Number of results to return (1-10, default 10)" }),
+		Type.Integer({ minimum: 1, maximum: 10, description: "Number of results to return (1-10, default 5 for anysearch_search and 3 per item in anysearch batch)" }),
 	),
 	zone: Type.Optional(
 		StringEnum(["cn", "intl"] as const, {
-			description: 'Region for the search: "cn" or "intl" (deprecated: still forwarded for backward compat, server may ignore)',
+			description: 'Region for the search: "cn" or "intl"',
 		}),
 	),
 	language: Type.Optional(
-		Type.String({ description: "Preferred language, e.g. zh-CN or en (deprecated: still forwarded for backward compat, server may ignore)" }),
+		Type.String({ description: "Preferred language, e.g. zh-CN or en" }),
 	),
 };
 const SEARCH_PARAMETERS = Type.Object({
@@ -97,7 +97,7 @@ const SEARCH_PARAMETERS = Type.Object({
 const BATCH_SEARCH_PARAMETERS = Type.Object({
 	queries: Type.Array(
 		Type.Object(SEARCH_ITEM_PARAMETERS),
-		{ minItems: 1, maxItems: 5, description: "1-5 search requests (one item = single search); one failure does not block the others" },
+		{ minItems: 1, maxItems: 5, description: "1-5 search requests (1-5 accepted, 2-3 recommended; one item = single search; omitted max_results defaults to 3; one failure does not block the others)" },
 	),
 });
 
@@ -119,25 +119,25 @@ const SUB_DOMAINS_PARAMETERS = Type.Object({
 		Type.Array(StringEnum([...DOMAINS] as const), {
 			minItems: 1,
 			maxItems: 5,
-			description: "Batch of up to 5 domains (takes priority over domain). Prefer this when unsure which domain fits.",
+			description: "Batch of up to 5 domains (takes priority over domain). Prefer one domain per call to keep the capability directory small; batch only for genuinely cross-domain tasks.",
 		}),
 	),
 });
 
 const SEARCH_DESCRIPTION =
-	`Direct web search via AnySearch (${API_ENDPOINT}) returning ranked results as Markdown. ` +
+	`Direct web search via AnySearch (POST https://api.anysearch.com/v1/search, JSON summaries) returning ranked results as Markdown with title, URL, and short snippet only (≈500 chars per result, 12,000 chars total; use anysearch_extract for full page content). ` +
 	"Two paths: (1) general — query only; (2) vertical — domain + sub_domain + sub_domain_params for structured " +
 	"data (stock quotes, academic papers, legal cases, flights, drugs, code docs, weather, …). For vertical search, " +
 	"call anysearch_get_sub_domains FIRST to discover valid sub_domain and params — never guess them; pass required " +
 	"params as empty strings when inapplicable. Strong for fresh facts, news, prices, and Chinese/regional content " +
-	"(zone \"cn\" with language \"zh-CN\"). Prefer web_search for comprehensive multi-provider research. " +
+	"(zone \"cn\" with language \"zh-CN\"). Default 5 results (explicit 1-10; 5×10 supported but heavy — prefer 3 for batch). " +
 	"Anonymous access works without an API key but is subject to rate and quota limits.";
 const ANYSEARCH_DESCRIPTION =
-	`Search the web via AnySearch (${API_ENDPOINT}): 1-5 queries in a single call — a single query or a ` +
-	"parallel batch. Each item follows the search schema (query required; domain/sub_domain/sub_domain_params " +
+	`Search the web via AnySearch (POST https://api.anysearch.com/v1/search, JSON summaries): 1-5 queries in a single call — a single query or a ` +
+	"parallel batch (1-5 accepted, 2-3 recommended; omitted max_results defaults to 3 per query). Each item follows the search schema (query required; domain/sub_domain/sub_domain_params " +
 	"optional, from anysearch_get_sub_domains — never invent them, and pass required params as empty strings). " +
-	"Best for multi-angle research and hybrid general+vertical queries; a single failed query does not block " +
-	"the others. Returns ranked results grouped per query, as Markdown. Strong for fresh facts, news, prices, " +
+	"Returns ranked results grouped per query as Markdown with title, URL, and short snippet only (≈500 chars per result, 12,000 chars total; use anysearch_extract for full page content). " +
+	"Up to 5×10 results supported but heavy — prefer 3 per query. Strong for fresh facts, news, prices, " +
 	"and Chinese/regional content (zone \"cn\" with language \"zh-CN\"). Prefer web_search for comprehensive " +
 	"multi-provider research. Anonymous access works without an API key but is subject to rate and quota limits.";
 const EXTRACT_DESCRIPTION =
@@ -146,14 +146,16 @@ const EXTRACT_DESCRIPTION =
 	"verify a claim against the original source.";
 const SUB_DOMAINS_DESCRIPTION =
 	"Query the AnySearch vertical domain directory. REQUIRED before any vertical (domain-routed) search: returns " +
-	"available sub_domains with descriptions and parameters (marked required) for the given domain(s). Results are " +
-	"cached per session — do not call repeatedly for the same domain set.";
+	"available sub_domains with descriptions and parameters (marked required) for the given domain(s). Prefer one " +
+	"domain per call to keep context small; batch only for genuinely cross-domain tasks. Results are cached per " +
+	"session — do not call repeatedly for the same domain set.";
 const PROMPT_SNIPPET =
 	"Search the web via AnySearch — general or vertical-domain search, parallel batch queries, and full-page URL extraction; complements web_search";
 const PROMPT_GUIDELINES = [
-	`Use anysearch_search for single-query lookups (zone "cn" + language "zh-CN" for Chinese/regional content). For vertical topics (stock prices, papers, legal cases, flights, drugs, code docs, weather, …) call anysearch_get_sub_domains first, then pass its domain/sub_domain/sub_domain_params — never invent them, and pass required params as empty strings when inapplicable.`,
-	"Use anysearch for 1-5 queries in one call — a single query, multi-angle research, or a hybrid general+vertical sweep.",
+	`Use anysearch_search for single-query lookups (zone "cn" + language "zh-CN" for Chinese/regional content). For vertical topics (stock prices, papers, legal cases, flights, drugs, code docs, weather, …) call anysearch_get_sub_domains first, then pass its domain/sub_domain/sub_domain_params — never invent them, and pass required params as empty strings when inapplicable. Single default 5 results (batch items default 3 per query), 500-char snippets, 12,000-char final cap; use anysearch_extract for full page content.`,
+	"Use anysearch for 1-5 queries in one call — a single query, multi-angle research, or a hybrid general+vertical sweep (1-5 accepted, 2-3 recommended; omitted max_results defaults to 3 per query; up to 5×10 supported but 500-char snippets and 12k cap keep context bounded; use anysearch_extract for full page).",
 	"Use anysearch_extract for full-page Markdown when snippets are insufficient or the user provides a URL.",
+	"When citing search results, preserve each returned title and URL as an exact pair; never rewrite, infer, or swap URLs. Call anysearch_get_sub_domains with one domain by default; batch domains only for genuinely cross-domain tasks because capability directories are verbose.",
 	"Prefer web_search for comprehensive or multi-angle research, multi-provider fan-out, interactive curation, or workflows combined with fetch_content, source_check, or get_search_content.",
 ];
 
@@ -166,6 +168,12 @@ function claimAnonymousModeReminder(): boolean {
 		// Reminder bookkeeping must never block extension startup or a real search.
 		return false;
 	}
+}
+
+export function boundSearchToolText(text: string, ...notices: string[]): string {
+	const combined = text + notices.join("");
+	if (combined.length <= MAX_SEARCH_OUTPUT_CHARS) return combined;
+	return `${combined.slice(0, MAX_SEARCH_OUTPUT_CHARS - 1)}…`;
 }
 
 function resultText(result: ToolResultLike): string {
@@ -473,10 +481,11 @@ export default function anysearchExtension(pi: ExtensionAPI) {
 				? `\n\n[提示] ${ANONYMOUS_MODE_NOTICE}`
 				: "";
 			const autoNote = await handleAutoRegistered(response, ctx);
+			const finalText = boundSearchToolText(response.text, suffix, autoNote);
 			return {
-				content: [{ type: "text", text: response.text + suffix + autoNote }],
+				content: [{ type: "text", text: finalText }],
 				details: {
-					text: response.text,
+					text: finalText,
 					isError: response.isError,
 					...(response.requestId ? { requestId: response.requestId } : {}),
 					mode: hasApiKey() ? "configured" : "anonymous",
@@ -511,10 +520,11 @@ export default function anysearchExtension(pi: ExtensionAPI) {
 			const response = await batchSearchAnySearch(params.queries as AnySearchParams[], signal);
 			const suffix = claimAnonymousModeReminder() ? `\n\n[提示] ${ANONYMOUS_MODE_NOTICE}` : "";
 			const autoNote = await handleAutoRegistered(response, ctx);
+			const finalText = boundSearchToolText(response.text, suffix, autoNote);
 			return {
-				content: [{ type: "text", text: response.text + suffix + autoNote }],
+				content: [{ type: "text", text: finalText }],
 				details: {
-					text: response.text,
+					text: finalText,
 					isError: response.isError,
 					...(response.requestId ? { requestId: response.requestId } : {}),
 					mode: hasApiKey() ? "configured" : "anonymous",
@@ -543,10 +553,11 @@ export default function anysearchExtension(pi: ExtensionAPI) {
 		async execute(_toolCallId, params, signal, _onUpdate, ctx) {
 			const response = await extractAnySearch(params.url, signal);
 			const autoNote = await handleAutoRegistered(response, ctx);
+			const finalText = response.text + autoNote;
 			return {
-				content: [{ type: "text", text: response.text + autoNote }],
+				content: [{ type: "text", text: finalText }],
 				details: {
-					text: response.text,
+					text: finalText,
 					isError: response.isError,
 					...(response.requestId ? { requestId: response.requestId } : {}),
 					mode: hasApiKey() ? "configured" : "anonymous",
@@ -575,10 +586,11 @@ export default function anysearchExtension(pi: ExtensionAPI) {
 				signal,
 			);
 			const autoNote = await handleAutoRegistered(response, ctx);
+			const finalText = response.text + autoNote;
 			return {
-				content: [{ type: "text", text: response.text + autoNote }],
+				content: [{ type: "text", text: finalText }],
 				details: {
-					text: response.text,
+					text: finalText,
 					isError: response.isError,
 					...(response.requestId ? { requestId: response.requestId } : {}),
 					mode: hasApiKey() ? "configured" : "anonymous",

@@ -1,8 +1,9 @@
 /**
- * AnySearch API client for the pi-anysearch extension (v3 / MCP endpoint).
+ * AnySearch API client for the pi-anysearch extension — hybrid transport.
  *
  * Docs: https://www.anysearch.com/docs — official skill v3.0.1 interface spec.
- * Endpoint: POST https://api.anysearch.com/mcp (JSON-RPC 2.0, method "tools/call").
+ * Search:  POST https://api.anysearch.com/v1/search (JSON summaries, title/URL/snippet)
+ * Support: POST https://api.anysearch.com/mcp (JSON-RPC 2.0, method "tools/call" — extract and capability discovery)
  *
  * Auth: `Authorization: Bearer <key>` is optional — anonymous requests work
  * but are rate-limited per IP and metered against the daily free quota.
@@ -13,9 +14,29 @@ import { dirname, join } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 
 const ANYSEARCH_MCP_URL = "https://api.anysearch.com/mcp";
-const ANYSEARCH_CLIENT = "pi-anysearch-tools/0.3.0"; // ponytail: static version for X-Anysearch-Client, bump when package.json bumps (telemetry parity with skill/3.0.1)
+const ANYSEARCH_SEARCH_URL = "https://api.anysearch.com/v1/search";
+const ANYSEARCH_CLIENT = "pi-anysearch-tools/0.3.1"; // ponytail: static version for X-Anysearch-Client, bump when package.json bumps (telemetry parity with skill/3.0.1)
 const SEARCH_TIMEOUT_MS = 30_000;
 const MAX_RESULTS = 10; // server hard cap
+export const DEFAULT_SEARCH_RESULTS = 5;
+export const DEFAULT_BATCH_RESULTS = 3;
+export const MAX_SNIPPET_CHARS = 500;
+export const MAX_SEARCH_OUTPUT_CHARS = 12_000;
+
+interface SearchItem {
+	title: string;
+	url: string;
+	snippet: string;
+}
+
+interface SearchApiCallResult {
+	items: SearchItem[];
+	isError: boolean;
+	errorText?: string;
+	requestId?: string;
+	autoRegisteredApiKey?: string;
+	raw: unknown;
+}
 
 /** The 17 vertical domains supported by the /mcp search tools. */
 export const DOMAINS = [
@@ -47,9 +68,7 @@ export interface AnySearchParams {
 	sub_domain?: string;
 	sub_domain_params?: Record<string, string>;
 	max_results?: number;
-	// ponytail: zone/language removed from official v3 search schema (v2.1.0) but
-	// kept here and still forwarded — live probe (2026) shows server still accepts
-	// them (200 OK) for backward compat; server may ignore. Do not break callers.
+	// zone/language are REST passthrough fields for POST https://api.anysearch.com/v1/search (documented).
 	zone?: string;
 	language?: string;
 }
@@ -205,26 +224,36 @@ function errorMessage(err: unknown): string {
 	return err instanceof Error ? err.message : String(err);
 }
 
+function isAbortError(err: unknown): boolean {
+	return !!err && typeof err === "object" && "name" in err && ((err as { name: unknown }).name === "AbortError" || (err as { name: unknown }).name === "TimeoutError");
+}
+
 function truncate(text: string, maxChars: number): string {
 	if (text.length <= maxChars) return text;
 	return `${text.slice(0, maxChars)}… (truncated)`;
 }
 
-/** Clamp max_results into the server-supported 1-10 range (default 10). */
-export function normalizeMaxResults(value: number | undefined): number {
-	if (typeof value !== "number" || !Number.isFinite(value)) return 10;
+/** Clamp max_results into the server-supported 1-10 range (default 5). */
+export function normalizeMaxResults(
+	value: number | undefined,
+	fallback = DEFAULT_SEARCH_RESULTS,
+): number {
+	if (typeof value !== "number" || !Number.isFinite(value)) return fallback;
 	return Math.max(1, Math.min(Math.floor(value), MAX_RESULTS));
 }
 
 /** Build the `arguments` object for the search / batch_search items. */
-export function buildSearchArguments(params: AnySearchParams): Record<string, unknown> {
+export function buildSearchArguments(
+	params: AnySearchParams,
+	defaultMaxResults = DEFAULT_SEARCH_RESULTS,
+): Record<string, unknown> {
 	const args: Record<string, unknown> = {
 		query: params.query,
-		max_results: normalizeMaxResults(params.max_results),
+		max_results: normalizeMaxResults(params.max_results, defaultMaxResults),
+		format: "json",
 	};
-	if (params.domain) args.domain = params.domain;
-	if (params.sub_domain) args.sub_domain = params.sub_domain;
-	if (params.sub_domain_params) args.sub_domain_params = params.sub_domain_params;
+	if (params.sub_domain) args.tag = params.sub_domain;
+	if (params.sub_domain_params) args.params = params.sub_domain_params;
 	if (params.zone) args.zone = params.zone;
 	if (params.language) args.language = params.language;
 	return args;
@@ -269,6 +298,46 @@ export function extractAutoRegisteredKey(structured: unknown, text: string): str
 
 let rpcId = 0;
 
+async function postJson(
+	url: string,
+	body: unknown,
+	accept: string,
+	signal?: AbortSignal,
+): Promise<{ response: Response; rawText: string; raw: unknown }> {
+	const apiKey = resolveApiKey();
+	const timeoutSignal = AbortSignal.timeout(SEARCH_TIMEOUT_MS);
+	const requestSignal = signal ? AbortSignal.any([timeoutSignal, signal]) : timeoutSignal;
+	let response: Response;
+	try {
+		response = await fetch(url, {
+			method: "POST",
+			headers: {
+				Accept: accept,
+				"Content-Type": "application/json",
+				"X-Anysearch-Client": ANYSEARCH_CLIENT,
+				...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
+			},
+			body: JSON.stringify(body),
+			signal: requestSignal,
+		});
+	} catch (err) {
+		if (isAbortError(err)) throw new Error("AnySearch request was cancelled or timed out");
+		const message = errorMessage(err);
+		if (message.toLowerCase().includes("abort")) {
+			throw new Error("AnySearch request was cancelled or timed out");
+		}
+		throw new Error(`AnySearch request failed: ${message}`);
+	}
+	const rawText = await response.text().catch(() => "");
+	let raw: unknown;
+	try {
+		raw = rawText ? JSON.parse(rawText) : {};
+	} catch {
+		raw = rawText;
+	}
+	return { response, rawText, raw };
+}
+
 /**
  * Call one AnySearch MCP tool (JSON-RPC 2.0 tools/call) against /mcp.
  * Throws a descriptive Error on network/HTTP/JSON-RPC failure; in-band tool
@@ -279,7 +348,6 @@ export async function callMcpTool(
 	args: Record<string, unknown>,
 	signal?: AbortSignal,
 ): Promise<McpCallResult> {
-	const apiKey = resolveApiKey();
 	const body = {
 		jsonrpc: "2.0",
 		id: ++rpcId,
@@ -287,37 +355,12 @@ export async function callMcpTool(
 		params: { name: toolName, arguments: args },
 	};
 
-	const timeoutSignal = AbortSignal.timeout(SEARCH_TIMEOUT_MS);
-	const requestSignal = signal ? AbortSignal.any([timeoutSignal, signal]) : timeoutSignal;
-
-	let response: Response;
-	try {
-		response = await fetch(ANYSEARCH_MCP_URL, {
-			method: "POST",
-			headers: {
-				Accept: "application/json, text/event-stream",
-				"Content-Type": "application/json",
-				"X-Anysearch-Client": ANYSEARCH_CLIENT,
-				...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
-			},
-			body: JSON.stringify(body),
-			signal: requestSignal,
-		});
-	} catch (err) {
-		const message = errorMessage(err);
-		if (message.toLowerCase().includes("abort")) {
-			throw new Error("AnySearch request was cancelled or timed out");
-		}
-		throw new Error(`AnySearch request failed: ${message}`);
-	}
-
-	const rawText = await response.text().catch(() => "");
-	let raw: unknown;
-	try {
-		raw = rawText ? JSON.parse(rawText) : {};
-	} catch {
-		raw = rawText;
-	}
+	const { response, rawText, raw } = await postJson(
+		ANYSEARCH_MCP_URL,
+		body,
+		"application/json, text/event-stream",
+		signal,
+	);
 
 	if (!response.ok) {
 		const envelope = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
@@ -422,86 +465,116 @@ export function titleSimilarity(a: string, b: string): number {
 const TITLE_SIMILARITY_THRESHOLD = 0.85;
 const MIN_TITLE_DEDUPE_CHARS = 12; // short generic titles ("Paris") never collapse on title
 
-/**
- * Drop duplicate search results from server Markdown (per `## Query N` / `## Search Results`
- * section). A result is dropped when its normalized URL equals an earlier item's, OR its
- * normalized title is >= 0.85 similar (char-bigram overlap, case/punctuation/leading-arXiv-id
- * insensitive, >= 12 chars) to an earlier item — i.e. high duplication is filtered out and
- * never returned into the agent's context. Kept items are renumbered 1..N and the
- * `## Search Results` header count is rewritten. Non-search text (extract, domain directory)
- * passes through unchanged.
- */
-export function dedupeSearchResults(text: string): string {
-	// ponytail: line-based state machine over the server's `### N. Title` / `- **URL**: ...` shape;
-	// fine while that shape is stable (drift already breaks parseSearchMarkdown too).
-	// ponytail: fixed 0.85 threshold + O(n²) pairwise title compare (n <= 10 per section);
-	// make the threshold a tool parameter if users need per-call sensitivity.
-	const urlKeys = new Set<string>();
-	const titleKeys: string[] = [];
-	let block: string[] | null = null;
-	let kept = 0;
-	let declaredCount = -1;
-	let headerOutIndex = -1;
-	const out: string[] = [];
-
-	const closeBlock = (): void => {
-		if (!block) return;
-		const head = block[0];
-		const title = head.match(/^###\s*\d+\.\s*(.*)$/)?.[1]?.trim() ?? "";
-		const urlLine = block.find((l) => /^\s*-\s*\*\*URL\*\*:\s*/.test(l));
-		const url = urlLine?.match(/^\s*-\s*\*\*URL\*\*:\s*(.*)$/)?.[1]?.trim() ?? "";
-		const uKey = normalizeSearchUrl(url);
-		const tKey = normalizeSearchTitle(title);
-		const dup =
-			(uKey !== "" && urlKeys.has(uKey)) ||
-			(tKey.length >= MIN_TITLE_DEDUPE_CHARS &&
-				titleKeys.some((prev) => titleSimilarity(prev, tKey) >= TITLE_SIMILARITY_THRESHOLD));
-		if (!dup) {
-			kept++;
-			out.push(head.replace(/^###\s*\d+\./, `### ${kept}.`), ...block.slice(1));
-			if (uKey) urlKeys.add(uKey);
-			if (tKey.length >= MIN_TITLE_DEDUPE_CHARS) titleKeys.push(tKey);
-		}
-		block = null;
-	};
-
-	const endSection = (): void => {
-		if (headerOutIndex >= 0 && declaredCount >= 0 && kept < declaredCount) {
-			out[headerOutIndex] = out[headerOutIndex].replace(
-				`(${declaredCount} results`,
-				`(${kept} results`,
-			);
-			}
-		headerOutIndex = -1;
-		declaredCount = -1;
-	};
-
-	for (const line of text.split("\n")) {
-		if (/^###\s*\d+\.\s/.test(line)) {
-			closeBlock();
-			block = [line];
-			continue;
-		}
-		if (/^##\s/.test(line)) {
-			closeBlock();
-			endSection();
-			kept = 0;
-			urlKeys.clear();
-			titleKeys.length = 0;
-			const count = line.match(/^## Search Results \((\d+) results/);
-			if (count) {
-				declaredCount = Number(count[1]);
-				headerOutIndex = out.length;
-			}
-			out.push(line);
-			continue;
-		}
-		if (block) block.push(line);
-		else out.push(line);
+/** Narrow structured-item dedupe helper: filters duplicate URLs/titles using shared seen sets. */
+function dedupeSearchItems(items: SearchItem[], seenUrls: Set<string>, seenTitles: string[]): SearchItem[] {
+	const unique: SearchItem[] = [];
+	for (const item of items) {
+		const uKey = normalizeSearchUrl(item.url);
+		const tKey = normalizeSearchTitle(item.title);
+		const dupUrl = uKey !== "" && seenUrls.has(uKey);
+		const dupTitle = tKey.length >= MIN_TITLE_DEDUPE_CHARS && seenTitles.some((prev) => titleSimilarity(prev, tKey) >= TITLE_SIMILARITY_THRESHOLD);
+		if (dupUrl || dupTitle) continue;
+		unique.push(item);
+		if (uKey) seenUrls.add(uKey);
+		if (tKey.length >= MIN_TITLE_DEDUPE_CHARS) seenTitles.push(tKey);
 	}
-	closeBlock();
-	endSection();
-	return out.join("\n");
+	return unique;
+}
+
+async function callSearchApi(
+	params: AnySearchParams,
+	defaultMaxResults: number,
+	signal?: AbortSignal,
+): Promise<SearchApiCallResult> {
+	const { response, rawText, raw } = await postJson(
+		ANYSEARCH_SEARCH_URL,
+		buildSearchArguments(params, defaultMaxResults),
+		"application/json",
+		signal,
+	);
+	if (!response.ok) {
+		const envelope = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
+		const requestId = findRequestId(envelope) ?? findRequestId((envelope as Record<string, unknown>).error);
+		const detail =
+			typeof raw === "string"
+				? truncate(raw, 300)
+				: truncate(JSON.stringify((envelope as Record<string, unknown>).error ?? envelope ?? raw) || "", 300);
+		const retryAfterHeader = response.headers.get("retry-after");
+		const retryHint = retryAfterHeader ? ` Retry-After: ${retryAfterHeader}s.` : "";
+		const requestHint = requestId ? ` (request_id: ${requestId})` : "";
+		throw new Error(`AnySearch API error ${response.status}: ${detail || "unknown error"}.${requestHint}${retryHint}`);
+	}
+	const envelope = raw && typeof raw === "object" && !Array.isArray(raw) ? (raw as Record<string, unknown>) : {};
+	const requestId = findRequestId(envelope);
+	const autoRegisteredApiKey =
+		extractAutoRegisteredKey(envelope, rawText) ?? extractAutoRegisteredKey((envelope as Record<string, unknown>).data, rawText);
+	if (envelope.code !== 0) {
+		if (autoRegisteredApiKey) {
+			const errorText = typeof envelope.message === "string" ? envelope.message : truncate(JSON.stringify(envelope) || "", 300);
+			return {
+				items: [],
+				isError: true,
+				errorText,
+				...(requestId ? { requestId } : {}),
+				autoRegisteredApiKey,
+				raw,
+			};
+		}
+		const detail = typeof envelope.message === "string" ? envelope.message : truncate(JSON.stringify(envelope) || "", 300);
+		const requestHint = requestId ? ` (request_id: ${requestId})` : "";
+		throw new Error(`AnySearch API error: ${detail}${requestHint}`);
+	}
+	const data = envelope.data as Record<string, unknown> | undefined;
+	if (!data || !Array.isArray((data as Record<string, unknown>).results)) {
+		const requestHint = requestId ? ` (request_id: ${requestId})` : "";
+		throw new Error(`AnySearch API returned invalid response: missing results array${requestHint}`);
+	}
+	const rawResults = (data as { results: unknown[] }).results;
+	const items: SearchItem[] = [];
+	for (const r of rawResults) {
+		if (!r || typeof r !== "object" || Array.isArray(r)) continue;
+		const rec = r as Record<string, unknown>;
+		const title = typeof rec.title === "string" ? rec.title.trim() : "";
+		const url = typeof rec.url === "string" ? rec.url.trim() : "";
+		if (!title || !url) continue;
+		const rawSnippet = typeof rec.snippet === "string" ? rec.snippet : "";
+		const normalizedSnippet = rawSnippet.replace(/\s+/g, " ").trim().slice(0, MAX_SNIPPET_CHARS);
+		items.push({ title, url, snippet: normalizedSnippet });
+	}
+	return {
+		items,
+		isError: false,
+		...(requestId ? { requestId } : {}),
+		...(autoRegisteredApiKey ? { autoRegisteredApiKey } : {}),
+		raw,
+	};
+}
+
+function buildSectionCandidate(header: string, nextHeader: string, emitted: SearchItem[], nextBlock: string): string {
+	const blocks = emitted.map((e, i) => {
+		const t = `### ${i + 1}. ${e.title}`;
+		const u = `- **URL**: ${e.url}`;
+		return e.snippet ? `${t}\n${u}\n- ${e.snippet}` : `${t}\n${u}`;
+	});
+	blocks.push(nextBlock);
+	return `${header}\n\n${nextHeader}\n\n${blocks.join("\n\n")}`;
+}
+
+function renderSearchResults(items: SearchItem[]): string {
+	const header = `## Search Results (${items.length} results)`;
+	if (items.length === 0) return header;
+	const lines: string[] = [header, ""];
+	items.forEach((item, i) => {
+		lines.push(`### ${i + 1}. ${item.title}`);
+		lines.push(`- **URL**: ${item.url}`);
+		if (item.snippet) lines.push(`- ${item.snippet}`);
+		if (i < items.length - 1) lines.push("");
+	});
+	let text = lines.join("\n");
+	if (text.length > MAX_SEARCH_OUTPUT_CHARS) {
+		text = truncate(text, MAX_SEARCH_OUTPUT_CHARS);
+	}
+	return text;
 }
 
 /** Run a single search (general or vertical) via the search tool. */
@@ -510,12 +583,28 @@ export async function searchAnySearch(
 	signal?: AbortSignal,
 ): Promise<McpCallResult> {
 	if (!params.query || !params.query.trim()) throw new Error("query is required");
-	const result = await callMcpTool("search", buildSearchArguments(params), signal);
-	if (!result.isError) result.text = dedupeSearchResults(result.text);
-	return result;
+	const result = await callSearchApi(params, DEFAULT_SEARCH_RESULTS, signal);
+	if (result.isError) {
+		return {
+			text: result.errorText ?? "",
+			isError: true,
+			...(result.requestId ? { requestId: result.requestId } : {}),
+			...(result.autoRegisteredApiKey ? { autoRegisteredApiKey: result.autoRegisteredApiKey } : {}),
+			raw: result.raw,
+		};
+	}
+	const uniqueItems = dedupeSearchItems(result.items, new Set<string>(), []);
+	const text = renderSearchResults(uniqueItems);
+	return {
+		text,
+		isError: false,
+		...(result.requestId ? { requestId: result.requestId } : {}),
+		...(result.autoRegisteredApiKey ? { autoRegisteredApiKey: result.autoRegisteredApiKey } : {}),
+		raw: result.raw,
+	};
 }
 
-/** Run 2-5 searches in one batch_search call; a single failure does not block the rest. */
+/** Run 1-5 searches via REST with Promise.allSettled; preserves order, isolates failures. */
 export async function batchSearchAnySearch(
 	queries: AnySearchParams[],
 	signal?: AbortSignal,
@@ -523,13 +612,110 @@ export async function batchSearchAnySearch(
 	if (!Array.isArray(queries) || queries.length < 1 || queries.length > 5) {
 		throw new Error("batch_search requires 1-5 queries");
 	}
-	const items = queries.map((item) => {
+	for (const item of queries) {
 		if (!item.query || !item.query.trim()) throw new Error("each batch_search query item requires a non-empty query");
-		return buildSearchArguments(item);
-	});
-	const result = await callMcpTool("batch_search", { queries: items }, signal);
-	if (!result.isError) result.text = dedupeSearchResults(result.text);
-	return result;
+	}
+	if (signal?.aborted) throw new Error("AnySearch request was cancelled or timed out");
+	const settled = await Promise.allSettled(
+		queries.map((q) => callSearchApi(q, DEFAULT_BATCH_RESULTS, signal)),
+	);
+	// If caller aborted, propagate cancellation instead of partial errors
+	if (signal?.aborted) throw new Error("AnySearch request was cancelled or timed out");
+	for (const r of settled) {
+		if (r.status === "rejected") {
+			if (isAbortError(r.reason)) throw r.reason;
+			const msg = errorMessage(r.reason);
+			if (msg.toLowerCase().includes("abort") || msg.includes("cancelled or timed out")) {
+				throw r.reason;
+			}
+		}
+	}
+	const sections: string[] = [];
+	const raws: unknown[] = [];
+	const seenUrls = new Set<string>();
+	const seenTitles: string[] = [];
+	const separatorChars = Math.max(0, settled.length - 1) * 2;
+	const perSectionBudget = Math.floor((MAX_SEARCH_OUTPUT_CHARS - separatorChars) / settled.length);
+	for (let i = 0; i < settled.length; i++) {
+		const q = queries[i];
+		const header = `## Query ${i + 1}: ${q.query}`;
+		const s = settled[i];
+		if (s.status === "fulfilled") {
+			const v = s.value;
+			if (v.isError) {
+				const msg = truncate(v.errorText ?? "Unknown error", 300);
+				sections.push(`${header}\n\nSearch failed: ${msg}`);
+				raws.push({ error: msg });
+			} else {
+				const uniqueItems = dedupeSearchItems(v.items, seenUrls, seenTitles);
+				// Fair per-section budget rendering
+				const emitted: SearchItem[] = [];
+				let sectionText = `${header}\n\n## Search Results (0 results)`;
+				for (const item of uniqueItems) {
+					const nextCount = emitted.length + 1;
+					const nextHeader = `## Search Results (${nextCount} results)`;
+					const titleLineNext = `### ${nextCount}. ${item.title}`;
+					const urlLineNext = `- **URL**: ${item.url}`;
+					const hasSnippet = !!item.snippet;
+					const snippetLineNext = hasSnippet ? `- ${item.snippet}` : "";
+					const blockNext = hasSnippet ? `${titleLineNext}\n${urlLineNext}\n${snippetLineNext}` : `${titleLineNext}\n${urlLineNext}`;
+					const candidateFull = buildSectionCandidate(header, nextHeader, emitted, blockNext);
+					if (candidateFull.length <= perSectionBudget) {
+						emitted.push(item);
+						sectionText = candidateFull;
+						continue;
+					}
+					// Try shrinking snippet before omitting title/URL
+					if (hasSnippet) {
+						const blockNoSnippet = `${titleLineNext}\n${urlLineNext}`;
+						const candidateNoSnippet = buildSectionCandidate(header, nextHeader, emitted, blockNoSnippet);
+						if (candidateNoSnippet.length <= perSectionBudget) {
+							const remaining = perSectionBudget - candidateNoSnippet.length - 3;
+							if (remaining >= 0) {
+								const truncated = item.snippet.slice(0, remaining);
+								if (truncated.length > 0) {
+									const snippetLineTrunc = `- ${truncated}`;
+									const blockTrunc = `${titleLineNext}\n${urlLineNext}\n${snippetLineTrunc}`;
+									const candidateTrunc = buildSectionCandidate(header, nextHeader, emitted, blockTrunc);
+									if (candidateTrunc.length <= perSectionBudget) {
+										emitted.push({ ...item, snippet: truncated });
+										sectionText = candidateTrunc;
+										continue;
+									}
+								}
+							}
+							// Omit snippet entirely
+							emitted.push({ ...item, snippet: "" });
+							sectionText = candidateNoSnippet;
+							continue;
+						}
+					}
+					// Stop before adding a block that would exceed allocation
+					break;
+				}
+				if (emitted.length === 0 && uniqueItems.length > 0) {
+					// Nothing fit but we still need header (edge: very long title/URL)
+					sectionText = `${header}\n\n## Search Results (0 results)`;
+				} else if (emitted.length === 0) {
+					sectionText = `${header}\n\n## Search Results (0 results)`;
+				}
+				sections.push(sectionText);
+				raws.push(v.raw);
+			}
+		} else {
+			const msg = truncate(errorMessage(s.reason), 300);
+			sections.push(`${header}\n\nSearch failed: ${msg}`);
+			raws.push({ error: msg });
+		}
+	}
+	const anySuccess = settled.some((r) => r.status === "fulfilled" && !(r.value as SearchApiCallResult).isError);
+	let text = sections.join("\n\n");
+	if (text.length > MAX_SEARCH_OUTPUT_CHARS) text = text.slice(0, MAX_SEARCH_OUTPUT_CHARS);
+	return {
+		text,
+		isError: !anySuccess,
+		raw: raws,
+	};
 }
 
 /** Fetch a URL's full page content as Markdown (server truncates at 50k chars). */
